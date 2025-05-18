@@ -1,0 +1,58 @@
+version: '3'
+services:
+  web74:
+    profiles: ["disabled"]
+  web_74_rh:
+    profiles: ["disabled"]
+  phpmyadmin:
+    profiles: ["disabled"]
+  rabbitmq:
+    profiles: ["disabled"]
+  rabbitmq_rhel:
+    profiles: ["disabled"]
+
+  web_82_rh:
+    extends:
+      file: custom-compose/web82.yml
+      service: web_82_rh
+    volumes:
+      - ./html:/var/www/html
+      - ./config/web82rh/php/custom_php.ini:/etc/php.d/custom_php.ini
+      - ./config/web82rh/mysql-client:/etc/mysql
+      - ./config/web82rh/apache2/sites-available:/etc/httpd/sites-available
+      - ./config/web82rh/apache2/sites-enabled:/etc/httpd/sites-enabled
+      - ./config/web82rh/apache2/conf.d/ssl.conf:/etc/httpd/conf.d/ssl.conf
+      - ./config/web82rh/apache2/cert:/etc/httpd/cert
+      - ./logs/apache_logs/web82rh:/var/log/httpd
+      - /etc/localtime:/etc/localtime
+      - ./config/root/bash_history:/root/.bash_history
+      - ./config/root/npmrc:/root/.npmrc
+      - ./config/root/composer-auth.json:/root/.config/composer/auth.json
+
+  ubuntuweb83:
+    extends:
+      file: custom-compose/ubuntuweb83.yml
+      service: ubuntuweb83
+    volumes:
+      - ./html:/var/www/html
+      - ./custom-compose/config/ubuntuweb83/apache2/sites-available:/etc/apache2/sites-available
+      - ./custom-compose/config/ubuntuweb83/apache2/sites-enabled:/etc/apache2/sites-enabled
+      - ./custom-compose/config/ubuntuweb83/apache2/cert:/etc/apache2/cert
+      - ./custom-compose/config/ubuntuweb83/apache2/conf.d/apache2.conf:/etc/apache2/apache2.conf
+      - ./custom-compose/config/ubuntuweb83/apache2/conf.d/custom.conf:/etc/apache2/conf.d/custom.conf
+      - ./custom-compose/config/ubuntuweb83/php/custom_php.ini:/etc/php/8.3/apache2/conf.d/99-custom.ini
+      - ./custom-compose/config/ubuntuweb83/php/custom_php.ini:/etc/php/8.3/cli/conf.d/99-custom.ini
+      - ./custom-compose/logs/apache_logs/ubuntuweb83:/var/log/apache2/ubuntuweb83
+      - /etc/localtime:/etc/localtime
+      - ./config/root/composer-auth.json:/root/.config/composer/auth.json
+      - ./custom-compose/config/ubuntuweb83/bash/.bashrc:/root/.bashrc
+
+  db101110:
+    extends:
+      file: custom-compose/db101110.yml
+      service: db101110
+    volumes:
+      - /etc/localtime:/etc/localtime
+      - mariadb101110:/var/lib/mysql
+volumes:
+  mariadb101110:
