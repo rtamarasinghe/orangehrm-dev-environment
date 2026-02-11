@@ -11,6 +11,31 @@ services:
   rabbitmq_rhel:
     profiles: ["disabled"]
 
+  web_71:
+    extends:
+      file: custom-compose/web71.yml
+      service: web71
+    volumes:
+      - ./html:/var/www/html
+      - ./config/web71/php/custom_php.ini:/etc/php.d/custom_php.ini
+      - ./config/web71/mysql-client:/etc/mysql
+      - ./config/web71/apache2/sites-available:/etc/httpd/sites-available
+      - ./config/web71/apache2/sites-enabled:/etc/httpd/sites-enabled
+      - ./config/web56/apache2/conf.d/ssl.conf:/etc/httpd/conf.d/ssl.conf
+      - ./config/web71/apache2/cert:/etc/httpd/cert
+      - ./logs/apache_logs/web71:/var/log/httpd
+      - /etc/localtime:/etc/localtime
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+
+  db102:
+    extends:
+      file: custom-compose/db102.yml
+      service: db102
+    volumes:
+      - ./custom-compose/logs/mysql_logs/db102:/var/log
+      - /etc/localtime:/etc/localtime
+      - mariadb102:/var/lib/mysql   
+
   web_82_rh:
     extends:
       file: custom-compose/web82.yml
@@ -57,3 +82,4 @@ services:
       - mariadb101110:/var/lib/mysql
 volumes:
   mariadb101110:
+  mariadb102:

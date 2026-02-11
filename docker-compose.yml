@@ -23,6 +23,8 @@ services:
     networks:
       ohrmdevnet:
         ipv4_address: 10.5.2.1
+        aliases:
+          - trunk.test-web82rh.orangehrmdev.com
     restart: always
     container_name: dev_nginx
 
