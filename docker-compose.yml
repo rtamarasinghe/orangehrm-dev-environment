@@ -86,48 +86,47 @@ services:
     restart: always
     container_name: dev_web_83_ubuntu
 
-  db101110:
-    image: orangehrm/orangehrm-db-images:mariadb-10.11.10-ubuntu-22.04
+  db101115:
+    image: orangehrm/orangehrm-db-images:mariadb-10.11.15-ubuntu-22.04
     expose:
       - "3306"
     volumes:
       - /etc/localtime:/etc/localtime
-      - mariadb101110:/var/lib/mysql
+      - mariadb101115:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: 1234
     networks:
       ohrmdevnet:
-        ipv4_address: 10.5.1.125
+        ipv4_address: 10.5.1.126
     restart: always
-    container_name: dev_mariadb_101110
+    container_name: dev_mariadb_101115
 
-  rabbitmq405:
-    image: rabbitmq:4.0.5-management
+  rabbitmq420:
+    image: rabbitmq:4.2.0-management
     ports:
-      - "16671:15671"
-      - "6672:5672"
-      - "6671:5671"
+      - "17671:15671"
+      - "7672:5672"
+      - "7671:5671"
     volumes:
-      - ./config/rabbitmq405/certs/:/cert_rabbitmq/
-      - ./config/rabbitmq405/config/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
-      - ./config/rabbitmq405/config/enabled_plugins:/etc/rabbitmq/enabled_plugins
-      - ./config/rabbitmq405/plugins/rabbitmq_delayed_message_exchange-4.0.2.ez:/plugins/rabbitmq_delayed_message_exchange-4.0.2.ez
+      - ./custom-compose/config/rabbitmq420/certs/:/cert_rabbitmq/
+      - ./custom-compose/config/rabbitmq420/config/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+      - ./custom-compose/config/rabbitmq420/config/enabled_plugins:/etc/rabbitmq/enabled_plugins
+      - ./custom-compose/config/rabbitmq420/plugins/rabbitmq_delayed_message_exchange-4.2.0.ez:/plugins/rabbitmq_delayed_message_exchange-4.2.0.ez
     environment:
       RABBITMQ_DEFAULT_USER: "guest"
       RABBITMQ_DEFAULT_PASS: "guest"
     networks:
       ohrmdevnet:
-        ipv4_address: 10.5.4.5
+        ipv4_address: 10.5.4.15
     restart: always
-    container_name: dev_rabbitmq_405
-
+    container_name: dev_rabbitmq_420
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
     volumes:
     - /etc/localtime:/etc/localtime
     environment:
-      PMA_HOSTS: db10422,db101110
+      PMA_HOSTS: db10422,db101110,db101115
     networks:
       ohrmdevnet:
         ipv4_address: 10.5.2.2
@@ -146,7 +145,7 @@ services:
 
 
 volumes:
-  mariadb101110:
+  mariadb101115:
 
 networks:
   ohrmdevnet:
