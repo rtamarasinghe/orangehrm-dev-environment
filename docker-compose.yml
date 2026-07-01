@@ -91,6 +91,7 @@ services:
     expose:
       - "3306"
     volumes:
+      - ./custom-compose/config/mariadb101115/mariadb.cnf:/etc/mysql/mariadb.cnf
       - /etc/localtime:/etc/localtime
       - mariadb101115:/var/lib/mysql
     environment:
