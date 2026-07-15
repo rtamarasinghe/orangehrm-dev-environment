@@ -1,4 +1,5 @@
-FROM orangehrm/test-environment:ubuntu24.04-php8.3-latest
+ARG BASE_IMAGE=orangehrm/test-environment:ubuntu24.04-php8.3-latest
+FROM ${BASE_IMAGE}
 
 LABEL authors = "OrangeHRM TechOps<techops@orangehrm.com>"
 
