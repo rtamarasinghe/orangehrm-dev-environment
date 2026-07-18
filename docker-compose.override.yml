@@ -1,0 +1,28 @@
+# Local-only override (gitignored) — Apple Silicon / arm64.
+# Active services: nginx, ubuntuweb83 (dev_web_83_ubuntu), db101115.
+# Everything else is parked under the "disabled" profile so `docker-compose up -d` skips it.
+# To bring a disabled one back for a session:
+#   docker-compose --profile disabled up -d <service>
+services:
+  web_82_rhel8:
+    profiles: ["disabled"]
+  web_82_rhel9:
+    profiles: ["disabled"]
+  rabbitmq420:
+    profiles: ["disabled"]
+  phpmyadmin:
+    profiles: ["disabled"]
+  ai_service_helpers:
+    profiles: ["disabled"]
+
+  # Run ubuntuweb83 as the locally-built NATIVE arm64 image instead of the
+  # official amd64 -latest tag (which would run under emulation).
+  # This image must be built first (see ARM64-BUILD.md) or `up` will fail.
+  ubuntuweb83:
+    image: orangehrm/dev-environment:ubuntu24.04-php8.3-latest-arm64
+
+  # The repo's DB image (orangehrm/...mariadb-10.11.15) is amd64-only and its
+  # gosu privilege-drop crashes under Rosetta on Apple Silicon ("exec format error").
+  # Override to the official multi-arch mariadb, which runs natively on arm64.
+  db101115:
+    image: mariadb:10.11.15
