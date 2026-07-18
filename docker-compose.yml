@@ -78,8 +78,9 @@ services:
       - ./logs/apache_logs/ubuntuweb83:/var/log/apache2/ubuntuweb83
       - ./config/ubuntuweb83/php/cli-php.ini:/etc/php/8.3/cli/php.ini
       - ./config/ubuntuweb83/php/apache2-php.ini:/etc/php/8.3/apache2/php.ini
+      - ./config/ubuntuweb83/bash/.bashrc:/root/.bashrc
       - /etc/localtime:/etc/localtime
-    privileged: true    
+    privileged: true
     networks:
       ohrmdevnet:
         ipv4_address: 10.5.0.183
