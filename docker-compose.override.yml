@@ -17,12 +17,28 @@ services:
 
   # Run ubuntuweb83 as the locally-built NATIVE arm64 image instead of the
   # official amd64 -latest tag (which would run under emulation).
-  # This image must be built first (see ARM64-BUILD.md) or `up` will fail.
+  #
+  # Arch-conditional via .env: WEB83_IMAGE is set to the -arm64 tag only on
+  # Apple Silicon (see .env.example). On Linux (no .env) this falls back to the
+  # default amd64 -latest tag, making the override a no-op there.
+  # The arm64 image must be built first (see ARM64-BUILD.md) or `up` will fail.
   ubuntuweb83:
-    image: orangehrm/dev-environment:ubuntu24.04-php8.3-latest-arm64
+    image: ${WEB83_IMAGE:-orangehrm/dev-environment:ubuntu24.04-php8.3-latest}
+    volumes:
+      # Keep the hot, disposable Symfony cache/log OFF the (slow) virtiofs bind
+      # mount — native Docker volumes avoid per-syscall virtiofs overhead that
+      # compounds over long test runs on macOS. Cache/log are regenerated.
+      - web83_trunk_cache:/var/www/html/OHRMStandalone/TEST/trunk/symfony/cache
+      - web83_trunk_log:/var/www/html/OHRMStandalone/TEST/trunk/symfony/log
 
   # The repo's DB image (orangehrm/...mariadb-10.11.15) is amd64-only and its
   # gosu privilege-drop crashes under Rosetta on Apple Silicon ("exec format error").
   # Override to the official multi-arch mariadb, which runs natively on arm64.
+  # Kept unconditional (not .env-driven): the official image is effectively
+  # equivalent to the repo image, so the swap is harmless on Linux too.
   db101115:
     image: mariadb:10.11.15
+
+volumes:
+  web83_trunk_cache:
+  web83_trunk_log:

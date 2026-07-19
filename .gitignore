@@ -3,3 +3,6 @@ vendor/
 *~
 tests/_output/*
 html/*
+
+# Per-machine Compose vars (see .env.example)
+.env

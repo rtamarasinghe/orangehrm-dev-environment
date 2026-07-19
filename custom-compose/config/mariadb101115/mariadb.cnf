@@ -25,13 +25,24 @@ wait_timeout=600
 interactive_timeout=600
 sql-mode=
 skip-name-resolve
-optimizer_switch=derived_merge=off,index_merge=on
+optimizer_switch=derived_merge=on,index_merge=on
 
 query_cache_type=1
 query_cache_size=50M
 query_cache_limit=256K
 table_open_cache=4000
 table_definition_cache=2000
+
+# --- LOCAL DEV/TEST SPEED (safe to lose data on crash; disposable test DB) ---
+# Mac/OrbStack fsync to the virtualized disk image is very slow, so full
+# per-commit durability dominates the unit-test wall clock (fixtures do a
+# truncate+repopulate per test). These trade crash-durability for speed and
+# are appropriate ONLY for a throwaway local test database, never production.
+innodb_flush_log_at_trx_commit=0
+innodb_doublewrite=0
+sync_binlog=0
+skip-log-bin
+# --- END LOCAL DEV/TEST SPEED ---
 
 #
 # * Galera-related settings
