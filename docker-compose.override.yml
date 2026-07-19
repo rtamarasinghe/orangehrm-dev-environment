@@ -1,4 +1,3 @@
-# Local-only override (gitignored) — Apple Silicon / arm64.
 # Active services: nginx, ubuntuweb83 (dev_web_83_ubuntu), db101115.
 # Everything else is parked under the "disabled" profile so `docker-compose up -d` skips it.
 # To bring a disabled one back for a session:
