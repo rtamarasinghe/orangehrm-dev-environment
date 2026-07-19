@@ -24,12 +24,31 @@ services:
   # The arm64 image must be built first (see ARM64-BUILD.md) or `up` will fail.
   ubuntuweb83:
     image: ${WEB83_IMAGE:-orangehrm/dev-environment:ubuntu24.04-php8.3-latest}
+    # Relocate the two single-file dotfiles (bash history, npm user config) into
+    # the web83_home volume below. Named volumes can only mount directories, not
+    # a single file, so instead of mounting the files we point bash/npm at paths
+    # inside a volume. Both env vars are honored by docker exec sessions.
+    environment:
+      HISTFILE: /root/.persist/bash_history
+      NPM_CONFIG_USERCONFIG: /root/.persist/npmrc
     volumes:
       # Keep the hot, disposable Symfony cache/log OFF the (slow) virtiofs bind
       # mount — native Docker volumes avoid per-syscall virtiofs overhead that
       # compounds over long test runs on macOS. Cache/log are regenerated.
       - web83_trunk_cache:/var/www/html/OHRMStandalone/TEST/trunk/symfony/cache
       - web83_trunk_log:/var/www/html/OHRMStandalone/TEST/trunk/symfony/log
+
+      # --- Persist dev state across container down/up cycles ---
+      # These survive `docker-compose down`/`up` because named volumes outlive
+      # the container. On FIRST creation Docker seeds each volume from the image's
+      # baked content at that path (nvm versions, composer keys), then persists
+      # everything written afterwards. NOTE: that image-seed happens only while
+      # the volume is empty — if a future image bump changes baked node versions,
+      # `docker volume rm web83_ubuntu_nvm` to re-seed from the new image.
+      - web83_ubuntu_home:/root/.persist              # .bash_history + .npmrc (via env vars above)
+      - web83_ubuntu_npm_cache:/root/.npm             # npm cache
+      - web83_ubuntu_nvm:/root/.nvm                    # nvm + installed node/npm versions & global CLIs
+      - web83_ubuntu_composer:/root/.config/composer   # composer auth.json, config.json, cache, keys
 
   # The repo's DB image (orangehrm/...mariadb-10.11.15) is amd64-only and its
   # gosu privilege-drop crashes under Rosetta on Apple Silicon ("exec format error").
@@ -42,3 +61,7 @@ services:
 volumes:
   web83_trunk_cache:
   web83_trunk_log:
+  web83_ubuntu_home:
+  web83_ubuntu_npm_cache:
+  web83_ubuntu_nvm:
+  web83_ubuntu_composer:
