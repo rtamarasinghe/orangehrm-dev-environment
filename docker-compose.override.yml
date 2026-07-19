@@ -57,6 +57,49 @@ services:
   db101115:
     image: mariadb:10.11.15
 
+  # On-demand AMD64 builder for the legacy Angular client under
+  # html/OHRMStandalone/TEST/trunk/symfony/web/client. Its toolchain
+  # (gulp 3.9 + gulp-sass/node-sass on node 6) has no working arm64 build, so it
+  # must run amd64 — under Rosetta emulation on Apple Silicon. This lets
+  # ubuntuweb83 stay a native arm64 image while the client build runs amd64.
+  #
+  # Parked under the "build" profile so `docker-compose up -d` NEVER starts it.
+  # Invoke on demand (see utils/web83-client-build.sh), e.g.:
+  #   docker-compose run --rm web83_client_build \
+  #     'source /root/.nvm/nvm.sh && nvm use default && npm install && bower install --allow-root && gulp inject'
+  #
+  # PREREQUISITE (Apple Silicon): amd64 emulation must be registered in the Docker
+  # VM, or the container dies with "exec format error". One-time per Docker Desktop
+  # (re)install, doesn't persist across full Docker resets:
+  #   docker run --privileged --rm tonistiigi/binfmt --install amd64
+  # (Or enable Docker Desktop > Settings > General > "Use Rosetta for x86_64/amd64".)
+  # `docker-compose run <svc>` starts a profiled service by name regardless of
+  # the profile, runs the command, and (with --rm) removes the container after.
+  web83_client_build:
+    image: orangehrm/dev-environment:ubuntu24.04-php8.3-latest   # amd64 official (NOT the arm64 tag)
+    platform: linux/amd64                                        # force amd64 -> Rosetta on Apple Silicon
+    profiles: ["build"]
+    working_dir: /var/www/html/OHRMStandalone/TEST/trunk/symfony/web/client
+    # bash login shell so nvm is available; the command string is passed as its argument.
+    entrypoint: ["/bin/bash", "-lc"]
+    volumes:
+      - ./html:/var/www/html
+      # node_modules lives in a private amd64 volume, NOT on the host bind mount:
+      #  - keeps arch-specific native modules (node-sass) off the shared host tree
+      #    so they never collide with the arm64 ubuntuweb83 container, and
+      #  - avoids slow virtiofs I/O during npm install under emulation.
+      # bower_components + build/ stay on ./html on purpose — Apache in the arm64
+      # container serves those generated assets, so they must be on the host tree.
+      - web83_client_node_modules:/var/www/html/OHRMStandalone/TEST/trunk/symfony/web/client/node_modules
+      - /etc/localtime:/etc/localtime
+      # Reuse the same npm auth/registry config (incl. the GitLab @enterprise
+      # token) that ubuntuweb83 persists, so private packages resolve here too.
+      - web83_ubuntu_home:/root/.persist
+    environment:
+      NPM_CONFIG_USERCONFIG: /root/.persist/npmrc
+    networks:
+      - ohrmdevnet   # auto-assigned IP; just needs outbound access to npm/bower/GitLab
+
 volumes:
   web83_trunk_cache:
   web83_trunk_log:
@@ -64,3 +107,4 @@ volumes:
   web83_ubuntu_npm_cache:
   web83_ubuntu_nvm:
   web83_ubuntu_composer:
+  web83_client_node_modules:
