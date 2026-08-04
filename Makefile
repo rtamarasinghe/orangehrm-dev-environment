@@ -17,7 +17,8 @@ BUILDER_SVC  := web83_client_build
 .PHONY: help \
         amd64-enable-mac amd64-check-mac \
         client-install-mac client-inject-mac client-build-mac \
-        client-shell-mac client-clean-mac
+        client-shell-mac client-clean-mac \
+        sync-dev-hosts
 
 help: ## Show this help
 	@echo "OrangeHRM dev environment — make targets:"
@@ -65,3 +66,10 @@ client-clean-mac: ## [mac] Remove the builder's node_modules volume + generated 
 	-docker volume rm web_web83_client_node_modules
 	-rm -rf html/OHRMStandalone/TEST/trunk/symfony/web/client/{build,.tmp}
 	@echo ">> Cleaned. Next client-*-mac run will reinstall node_modules from scratch."
+
+## ----------------------------------------------------------------------------
+## TEST source dirs -> dev domain hostnames
+## ----------------------------------------------------------------------------
+
+sync-dev-hosts: ## Sync /etc/hosts + report missing nginx aliases for TEST source dirs
+	utils/sync-dev-hosts.sh

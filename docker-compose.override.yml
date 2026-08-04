@@ -3,6 +3,26 @@
 # To bring a disabled one back for a session:
 #   docker-compose --profile disabled up -d <service>
 services:
+  # Let the TEST source tree be mounted from outside the repo (see
+  # OHRM_TEST_SRC_PATH in .env.example) instead of the in-repo
+  # html/OHRMStandalone/TEST. Layered on top of the base ./html bind mount —
+  # Docker mounts nested bind targets in parent-then-child order regardless of
+  # list position, so this correctly overlays just the TEST subdirectory.
+  #
+  # aliases below make each <dirname>.test-webubuntu83.orangehrmdev.com
+  # hostname resolvable from OTHER containers on ohrmdevnet (nginx is the
+  # reverse-proxy entrypoint, so that's where the alias needs to live — not
+  # on ubuntuweb83). The host side (/etc/hosts) is separate and not covered
+  # by this file; run utils/sync-dev-hosts.sh after adding/removing a
+  # directory under TEST to keep both /etc/hosts and this alias list current.
+  nginx:
+    volumes:
+      - ${OHRM_TEST_SRC_PATH:-./html/OHRMStandalone/TEST}:/var/www/html/OHRMStandalone/TEST
+    networks:
+      ohrmdevnet:
+        aliases:
+          - trunk.test-webubuntu83.orangehrmdev.com
+
   web_82_rhel8:
     profiles: ["disabled"]
   web_82_rhel9:
@@ -31,6 +51,10 @@ services:
       HISTFILE: /root/.persist/bash_history
       NPM_CONFIG_USERCONFIG: /root/.persist/npmrc
     volumes:
+      # Same TEST source override as the nginx service above — keep both in
+      # sync so ubuntuweb83 serves the same tree nginx proxies to.
+      - ${OHRM_TEST_SRC_PATH:-./html/OHRMStandalone/TEST}:/var/www/html/OHRMStandalone/TEST
+
       # Keep the hot, disposable Symfony cache/log OFF the (slow) virtiofs bind
       # mount — native Docker volumes avoid per-syscall virtiofs overhead that
       # compounds over long test runs on macOS. Cache/log are regenerated.
