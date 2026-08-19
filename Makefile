@@ -10,6 +10,7 @@
 
 SHELL := /bin/bash
 CLIENT_BUILD := utils/web83-client-build.sh
+OHRM_SHELL   := utils/ohrm-shell.sh
 BUILDER_SVC  := web83_client_build
 
 .DEFAULT_GOAL := help
@@ -18,6 +19,7 @@ BUILDER_SVC  := web83_client_build
         amd64-enable-mac amd64-check-mac \
         client-install-mac client-inject-mac client-build-mac \
         client-shell-mac client-clean-mac \
+        shell sql install-ohrm \
         sync-dev-hosts
 
 help: ## Show this help
@@ -29,6 +31,9 @@ help: ## Show this help
 	@echo
 	@echo "Apple Silicon: run 'make amd64-enable-mac' once per Docker Desktop start"
 	@echo "before the client-*-mac targets (registers amd64 emulation)."
+	@echo
+	@echo "Shells: 'make shell' needs you to be in this directory. Run 'make install-ohrm'"
+	@echo "once to get the 'ohrm' command, which works from anywhere."
 
 ## ----------------------------------------------------------------------------
 ## Apple Silicon amd64 emulation
@@ -66,6 +71,23 @@ client-clean-mac: ## [mac] Remove the builder's node_modules volume + generated 
 	-docker volume rm web_web83_client_node_modules
 	-rm -rf html/OHRMStandalone/TEST/trunk/symfony/web/client/{build,.tmp}
 	@echo ">> Cleaned. Next client-*-mac run will reinstall node_modules from scratch."
+
+## ----------------------------------------------------------------------------
+## Shells into ubuntuweb83
+## ----------------------------------------------------------------------------
+
+# Thin front door onto utils/ohrm-shell.sh, which is the same script the `ohrm`
+# shell function calls. Working copy (WC) is optional: left unset it is inferred
+# from your current directory, then $OHRM_WC, then trunk.
+
+shell: ## Shell into ubuntuweb83 (D=sf|dt|vue|client, WC=<working copy>)
+	@$(OHRM_SHELL) $(D) $(WC)
+
+sql: ## MySQL console on the dev database (via ubuntuweb83)
+	@$(OHRM_SHELL) sql
+
+install-ohrm: ## Add the 'ohrm' shell function to your shell config (asks first)
+	@$(OHRM_SHELL) install
 
 ## ----------------------------------------------------------------------------
 ## TEST source dirs -> dev domain hostnames
