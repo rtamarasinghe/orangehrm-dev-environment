@@ -49,6 +49,14 @@ MIRROR_SKIP=(
   'symfony/cache/*' 'symfony/log/*' 'upgrader/log/*' '.git/*'
   'symfony/_output/*' 'symfony/.phpunit.cache/*' '.playwright-mcp/*' '.review/*'
   'devTools/citra-cowork/_output/*' 'devTools/citra-cowork/.feedback-repo/*'
+  # setup.sh wrote .claude/{skills,agents,...} as ABSOLUTE symlinks into the
+  # SOURCE tree's .repo, and the hook commands in .claude/settings.json are
+  # absolute too. Those links are copied verbatim and keep resolving to the
+  # source, which is what we want: one clone, one `git pull`, every tree
+  # updated. A per-tree clone is 15MB that nothing points at -- and a trap,
+  # because `setup.sh` update mode inside the new tree would pull the orphan
+  # while the tree keeps reading the source's copy.
+  'devTools/citra-cowork/.repo/*'
   'phpcs_report.xml'
 )
 
@@ -209,6 +217,31 @@ cmd_new() {
   edit_inplace "$dst/symfony/config/databases.yml" \
     -e "s/dbname=$src_test/dbname=$test_db/g" -e "s/dbname=$src_app/dbname=$app_db/g"
   log "databases.yml -> $(grep -c "dbname=$app_db\|dbname=$test_db" "$dst/symfony/config/databases.yml") dsn(s) rewritten"
+
+  # 3b. Point citra-cowork's browser-driving agents at THIS tree's instance.
+  #     configure_instance() derives the URL from the checkout's folder name,
+  #     so the copied file names the SOURCE tree. Left alone, browser-tester,
+  #     the bugfix reproduction stage and dynamic security review all log into
+  #     the source instance and write there while you believe you are in $slug.
+  #     Credentials are deliberately preserved: the cloned database carries the
+  #     source's users, so its username/password are the correct ones.
+  local inst="$dst/devTools/citra-cowork/.instance.json"
+  if [[ -f "$inst" ]]; then
+    if URL="$(url "$slug")" python3 -c '
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["url"] = os.environ["URL"]
+json.dump(d, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+' "$inst"; then
+      chmod 600 "$inst"
+      log ".instance.json -> $(url "$slug")"
+    else
+      warn "could not rewrite $inst -- it still names the source instance."
+      warn "    Fix it before running any browser-driving agent in $slug."
+    fi
+  fi
 
   # 4. Databases. Dump and restore both stay inside the DB container, so ~500MB
   #    never crosses the docker boundary.
