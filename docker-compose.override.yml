@@ -22,6 +22,12 @@ services:
       ohrmdevnet:
         aliases:
           - trunk.test-webubuntu83.orangehrmdev.com
+          - pawn.test-webubuntu83.orangehrmdev.com
+          - knight.test-webubuntu83.orangehrmdev.com
+          - bishop.test-webubuntu83.orangehrmdev.com
+          - rook.test-webubuntu83.orangehrmdev.com
+          - queen.test-webubuntu83.orangehrmdev.com
+          - king.test-webubuntu83.orangehrmdev.com
 
   web_82_rhel8:
     profiles: ["disabled"]
