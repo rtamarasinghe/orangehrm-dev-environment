@@ -7,11 +7,18 @@
 #
 # The client-* targets wrap utils/web83-client-build.sh so the build logic lives
 # in one place; this Makefile is just the friendly front door.
+#
+# WC=<working copy> picks which tree under OHRMStandalone/TEST a target acts on,
+# for the client-* targets as well as `shell`. Left unset it falls back the same
+# way `ohrm` does: your current directory, then $OHRM_WC, then trunk.
 
 SHELL := /bin/bash
 CLIENT_BUILD := utils/web83-client-build.sh
 OHRM_SHELL   := utils/ohrm-shell.sh
-BUILDER_SVC  := web83_client_build
+
+# Recursive (=), not simple (:=), so WC is read when a recipe runs — which is
+# what lets `make client-build-mac WC=amber` work from the command line.
+WC_FLAG = $(if $(WC),--wc $(WC))
 
 .DEFAULT_GOAL := help
 
@@ -32,6 +39,9 @@ help: ## Show this help
 	@echo "Apple Silicon: run 'make amd64-enable-mac' once per Docker Desktop start"
 	@echo "before the client-*-mac targets (registers amd64 emulation)."
 	@echo
+	@echo "WC=<working copy> targets a tree other than trunk, e.g."
+	@echo "  make client-build-mac WC=amber      make shell D=vue WC=amber"
+	@echo
 	@echo "Shells: 'make shell' needs you to be in this directory. Run 'make install-ohrm'"
 	@echo "once to get the 'ohrm' command, which works from anywhere."
 
@@ -51,26 +61,27 @@ amd64-check-mac: ## [mac] Verify amd64 emulation is available (used as a guard)
 	       exit 1; }
 
 ## ----------------------------------------------------------------------------
-## Legacy Angular client build (html/.../symfony/web/client) — amd64 on Mac
+## Legacy Angular client build (<working copy>/symfony/web/client) — amd64 on Mac
 ## ----------------------------------------------------------------------------
 
-client-install-mac: amd64-check-mac ## [mac] npm install + bower install (amd64 builder)
-	$(CLIENT_BUILD) install
+# All of these take an optional WC=<working copy>; see the WC note at the top.
+# Each tree keeps its own node_modules volume, so switching between them with WC
+# does not force a reinstall.
 
-client-inject-mac: amd64-check-mac ## [mac] Development build: install + gulp inject
-	$(CLIENT_BUILD) inject
+client-install-mac: amd64-check-mac ## [mac] npm install + bower install (WC=<working copy>)
+	$(CLIENT_BUILD) $(WC_FLAG) install
 
-client-build-mac: amd64-check-mac ## [mac] Production build: install + gulp build
-	$(CLIENT_BUILD) build
+client-inject-mac: amd64-check-mac ## [mac] Development build: install + gulp inject (WC=)
+	$(CLIENT_BUILD) $(WC_FLAG) inject
 
-client-shell-mac: amd64-check-mac ## [mac] Open an interactive shell in the amd64 builder (node 6)
-	docker-compose run --rm $(BUILDER_SVC) \
-	  'source /root/.nvm/nvm.sh && nvm use default >/dev/null && cd $$PWD && exec bash'
+client-build-mac: amd64-check-mac ## [mac] Production build: install + gulp build (WC=)
+	$(CLIENT_BUILD) $(WC_FLAG) build
 
-client-clean-mac: ## [mac] Remove the builder's node_modules volume + generated build/.tmp
-	-docker volume rm web_web83_client_node_modules
-	-rm -rf html/OHRMStandalone/TEST/trunk/symfony/web/client/{build,.tmp}
-	@echo ">> Cleaned. Next client-*-mac run will reinstall node_modules from scratch."
+client-shell-mac: amd64-check-mac ## [mac] Interactive shell in the amd64 builder, node 6 (WC=)
+	$(CLIENT_BUILD) $(WC_FLAG) shell
+
+client-clean-mac: ## [mac] Remove this tree's node_modules volume + build/.tmp (WC=)
+	@$(CLIENT_BUILD) $(WC_FLAG) clean
 
 ## ----------------------------------------------------------------------------
 ## Shells into ubuntuweb83

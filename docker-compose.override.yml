@@ -88,10 +88,15 @@ services:
     image: mariadb:10.11.15
 
   # On-demand AMD64 builder for the legacy Angular client under
-  # html/OHRMStandalone/TEST/trunk/symfony/web/client. Its toolchain
+  # <TEST source>/<working-copy>/symfony/web/client. Its toolchain
   # (gulp 3.9 + gulp-sass/node-sass on node 6) has no working arm64 build, so it
   # must run amd64 — under Rosetta emulation on Apple Silicon. This lets
   # ubuntuweb83 stay a native arm64 image while the client build runs amd64.
+  #
+  # The working_dir and node_modules volume below are the *trunk* defaults. Other
+  # working copies are built by overriding both per run (`run -w ... -v ...`) —
+  # utils/web83-client-build.sh --wc <wc> and utils/ohrm-tree.sh build-client
+  # both do exactly that, and agree on the per-tree volume name.
   #
   # Parked under the "build" profile so `docker-compose up -d` NEVER starts it.
   # Invoke on demand (see utils/web83-client-build.sh), e.g.:
@@ -109,17 +114,21 @@ services:
     image: orangehrm/dev-environment:ubuntu24.04-php8.3-latest   # amd64 official (NOT the arm64 tag)
     platform: linux/amd64                                        # force amd64 -> Rosetta on Apple Silicon
     profiles: ["build"]
-    working_dir: /var/www/html/OHRMStandalone/TEST/trunk/symfony/web/client
+    working_dir: /var/www/html/OHRMStandalone/TEST/trunk/symfony/web/client   # default; -w overrides per tree
     # bash login shell so nvm is available; the command string is passed as its argument.
     entrypoint: ["/bin/bash", "-lc"]
     volumes:
-      - ./html:/var/www/html
+      # Same source as the web containers above, so a TEST tree mounted from
+      # outside the repo is the one that actually gets built. Hardcoding ./html
+      # here instead would let the builder compile a different tree than the one
+      # ubuntuweb83 serves.
+      - ${OHRM_TEST_SRC_PATH:-./html/OHRMStandalone/TEST}:/var/www/html/OHRMStandalone/TEST
       # node_modules lives in a private amd64 volume, NOT on the host bind mount:
       #  - keeps arch-specific native modules (node-sass) off the shared host tree
       #    so they never collide with the arm64 ubuntuweb83 container, and
       #  - avoids slow virtiofs I/O during npm install under emulation.
-      # bower_components + build/ stay on ./html on purpose — Apache in the arm64
-      # container serves those generated assets, so they must be on the host tree.
+      # bower_components + build/ stay on the host tree on purpose — Apache in the
+      # arm64 container serves those generated assets from there.
       - web83_client_node_modules:/var/www/html/OHRMStandalone/TEST/trunk/symfony/web/client/node_modules
       - /etc/localtime:/etc/localtime
       # Reuse the same npm auth/registry config (incl. the GitLab @enterprise
