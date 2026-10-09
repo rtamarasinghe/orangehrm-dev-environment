@@ -22,6 +22,8 @@
 #   ohrm sql                 # mysql console on the dev database
 #   ohrm sql -- 'show databases;'
 #   ohrm ls                  # list the working copies under TEST
+#   ohrm build [steps] [wc]  # rebuild after a branch switch (sf, vue, client,
+#                            # optional data load) — see 'ohrm build --help'
 #
 #   ohrm install             # add the `ohrm` function to your shell config
 #   ohrm install --rc ~/.zshrc --rc ~/.bash_profile   # target specific files
@@ -81,7 +83,7 @@ INSTALL_MARKER="# ohrm — shell into ubuntuweb83 (added by utils/ohrm-shell.sh 
 
 usage() {
   printf 'usage: ohrm [destination] [working-copy] [-- command...]\n' >&2
-  printf 'destinations: sf (default) | dt | vue | client | sql | ls | install\n' >&2
+  printf 'destinations: sf (default) | dt | vue | client | sql | ls | install | build\n' >&2
   printf "run 'ohrm --help' for the full description\n" >&2
   exit "${1:-2}"
 }
@@ -235,6 +237,11 @@ esac
 if [[ "${ohrm_args[0]:-}" == "install" ]]; then
   do_install "${ohrm_args[@]:1}"
   exit $?
+fi
+
+# `build` has its own steps and flags too; it lives in utils/ohrm-build.sh.
+if [[ "${ohrm_args[0]:-}" == "build" ]]; then
+  exec "$repo_root/utils/ohrm-build.sh" "${ohrm_args[@]:1}"
 fi
 
 # First argument is a destination if it names one; otherwise it's a working copy

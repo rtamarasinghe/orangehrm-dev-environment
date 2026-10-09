@@ -123,6 +123,11 @@ check "missing destination dir is an error" \
 
 check "unknown flag is rejected" "usage" "$(run --bogus)"
 
+echo "behaviour: build"
+check "build hands its arguments to ohrm-build.sh" \
+      "-w $C/feature-x/symfony/web/vue-app dev_web_83_ubuntu bash -lc" "$(run build vue feature-x)"
+check "build --help is the build help, not ohrm's" "Steps:" "$(run build --help)"
+
 echo "behaviour: install"
 
 # install writes for real, so it runs against a throwaway HOME rather than
