@@ -6,3 +6,4 @@ html/*
 
 # Per-machine Compose vars (see .env.example)
 .env
+config/root
