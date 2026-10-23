@@ -20,6 +20,10 @@
 # TEST/<slug>/symfony/web, and the wildcard cert already covers it. Only DNS
 # (/etc/hosts + the nginx container alias) is per-tree, and `new` does both.
 #
+# Review notes, task output and plans are shared, not per tree: each tree's .review,
+# _output and .superpowers is a relative link into TEST/_work, so a review started in
+# one tree can be continued from another. `remove` deletes the links, never _work.
+#
 # Everything that compiles runs in a container, never on the host:
 #   composer      -> dev_web_83_ubuntu           (the host has no matching PHP)
 #   vue-app build -> dev_web_83_ubuntu, Node 14  (native arm64)
@@ -47,8 +51,12 @@ SOURCE_WC_DEFAULT="${OHRM_SOURCE_WC:-trunk}"
 # a tree that provisions cleanly and cannot boot.
 MIRROR_SKIP=(
   'symfony/cache/*' 'symfony/log/*' 'upgrader/log/*' '.git/*'
-  'symfony/_output/*' 'symfony/.phpunit.cache/*' '.playwright-mcp/*' '.review/*'
+  'symfony/_output/*' 'symfony/.phpunit.cache/*' '.playwright-mcp/*'
   'devTools/citra-cowork/_output/*' 'devTools/citra-cowork/.feedback-repo/*'
+  # Links into the shared TEST/_work (see link_shared). mirror() follows a link to
+  # a directory, so mirroring one would copy every tree's shared files into a
+  # private folder in the new tree.
+  '.review/*' '_output/*' '.superpowers/*'
   # setup.sh wrote .claude/{skills,agents,...} as ABSOLUTE symlinks into the
   # SOURCE tree's .repo, and the hook commands in .claude/settings.json are
   # absolute too. Those links are copied verbatim and keep resolving to the
@@ -142,6 +150,27 @@ mirror_ignored() {
   log "mirrored $n ignored path(s)"
 }
 
+# .review, _output and .superpowers are shared by every tree. Each is a relative
+# link into TEST/_work, so it resolves the same on the host and in the web
+# container, which mounts TEST but not the rest of the host. The ignore rules must
+# not end in a slash: git matches `/_output/` only against a real directory, and
+# the link would show up untracked.
+SHARED_DIRS=(.review:review _output:output .superpowers:superpowers)
+link_shared() {
+  local root="$1" dst="$2" pair name target exclude="$2/.git/info/exclude"
+  mkdir -p "$(dirname "$exclude")"; touch "$exclude"
+  for pair in "${SHARED_DIRS[@]}"; do
+    name="${pair%%:*}"; target="${pair##*:}"
+    mkdir -p "$root/_work/$target"
+    if [[ -e "$dst/$name" || -L "$dst/$name" ]]; then
+      warn "$dst/$name already exists, so it is not linked to _work/$target"
+    else
+      ln -s "../_work/$target" "$dst/$name"
+    fi
+    grep -qxF -e "/$name" -e "$name" "$exclude" || printf '/%s\n' "$name" >> "$exclude"
+  done
+}
+
 # dbname= out of one top-level section of databases.yml.
 yml_dbname() {
   awk -v want="$2" '
@@ -212,6 +241,10 @@ cmd_new() {
   # 2. Gitignored runtime files.
   log "mirroring the source tree's git-ignored set (copy-on-write)"
   mirror_ignored "$src" "$dst" "$lean"
+
+  # 2b. Shared review notes, task output and plans.
+  link_shared "$root" "$dst"
+  log "linked .review, _output and .superpowers to $root/_work"
 
   # 3. Point this tree at its own databases, in every env block.
   edit_inplace "$dst/symfony/config/databases.yml" \
@@ -437,6 +470,7 @@ cmd_remove() {
 
   db_exists "$slug"      && { log "dropping database $slug";      sql "DROP DATABASE \`$slug\`;"; }
   db_exists "test_$slug" && { log "dropping database test_$slug"; sql "DROP DATABASE \`test_$slug\`;"; }
+  # Neither chmod -R nor rm -rf follows links, so this leaves TEST/_work alone.
   log "removing $dst"; chmod -R u+w "$dst" 2>/dev/null || true; rm -rf "$dst"
 
   log "removing DNS entries"
