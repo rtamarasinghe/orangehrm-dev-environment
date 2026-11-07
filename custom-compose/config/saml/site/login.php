@@ -3,8 +3,10 @@
 /**
  * The container IdP's sign-in page: asserts whatever username is typed, trimmed.
  *
- * Reached only through AnyUser::authenticate(), which supplies ?AuthState=<id>. A missing or stale
- * AuthState surfaces as SimpleSAMLphp's own error page.
+ * Reached only through AnyUser::authenticate(), which supplies ?AuthState=<id>. On POST,
+ * Auth\State::loadState() resumes it: a lost state whose AuthState carries a restart URL (IdP SSO
+ * requests set one) restarts that SSO request; any other missing or stale AuthState ends on
+ * SimpleSAMLphp's own error page.
  */
 
 declare(strict_types=1);
