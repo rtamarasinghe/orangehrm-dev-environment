@@ -26,7 +26,9 @@
 #      running sudo (--yes, -y answers yes); without one it prints the line to add.
 #   5. the trees, state, generated and data folders
 # Then it starts the saml service alone, never its dependencies, and waits up to
-# 30 s for SimpleSAMLphp to answer inside the container.
+# 30 s for SimpleSAMLphp to answer inside the container. Every run then rewrites
+# custom-compose/config/saml/generated/idp-metadata.xml and sp-metadata.xml, the
+# container IdP's and SP's metadata, which link puts into a tree's database.
 #
 # Environment overrides: OHRM_TEST_SRC_PATH, OHRM_WEB_CONTAINER, OHRM_DB_PASS
 # (MySQL root password, default 1234), and OHRM_WEB_RUNNING=true/false, which
@@ -222,6 +224,15 @@ wait_for_saml() {
   done
 }
 
+# Fetches <url> inside the running container and writes it to <file>. A failed
+# fetch stops `up` and leaves the earlier <file> as it was.
+export_metadata() { # export_metadata <url> <file>
+  local xml
+  xml="$(run docker exec "$SAML_CONTAINER" curl -fsS "$1")" \
+    || die "could not fetch $1 inside $SAML_CONTAINER; see: docker logs $SAML_CONTAINER"
+  printf '%s\n' "$xml" | write_file "$2"
+}
+
 cmd_up() {
   ensure_container_keys
   ensure_tls_cert
@@ -233,6 +244,9 @@ cmd_up() {
   log "building and starting $SAML_CONTAINER"
   compose up -d --build --no-deps saml
   wait_for_saml
+  log "exporting the container's IdP and SP metadata to $SAML_DIR/generated"
+  export_metadata http://localhost/simplesaml/module.php/saml/idp/metadata "$SAML_DIR/generated/idp-metadata.xml"
+  export_metadata http://localhost/simplesaml/module.php/saml/sp/metadata/container-sp "$SAML_DIR/generated/sp-metadata.xml"
   log "$SAML_CONTAINER is up: $SAML_URL"
 }
 

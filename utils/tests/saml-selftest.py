@@ -6,7 +6,10 @@ Usage: python3 -I utils/tests/saml-selftest.py --cafile "$(mkcert -CAROOT)/rootC
   idp  IdP-initiated sign-ins at the container IdP for the container's own SP
        (https://saml.test/sp). Each case decodes the SAMLResponse in the IdP's auto-submit form
        and never posts it on.
+  sp   Full round trips between the container SP and the container IdP, SP- and IdP-initiated,
+       posted on to the SP's ACS and checked on its result page.
 
+Each case uses its own cookie jar, so no IdP or SP session carries over between cases.
 Needs `ohrm saml up` and a running dev_saml. Touches no tree. Prints one `ok <case>` or
 `FAIL <case>: <reason>` line per case and exits 0 only when every case passed.
 Stdlib only: the host has Python 3.9 without lxml.
@@ -29,6 +32,8 @@ ORIGIN = "https://saml.test"
 CONTAINER_SP = ORIGIN + "/sp"
 IDP_SSO = ORIGIN + "/simplesaml/module.php/saml/idp/singleSignOnService"
 LOGIN_PAGE = ORIGIN + "/login.php"
+SP_PAGE = ORIGIN + "/sp/"
+RESULT_PAGE = ORIGIN + "/sp/result.php"
 NS = {
     "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
     "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
@@ -99,14 +104,15 @@ def excerpt(body):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()[:300]
 
 
-def open_login_page(browser):
-    """Start IdP-initiated SSO for the container SP. Returns (login page URL, login page HTML)."""
-    sso = IDP_SSO + "?spentityid=" + urllib.parse.quote(CONTAINER_SP, safe="")
-    url, status, body = follow(browser, sso)
+def open_login_page(browser, start=None):
+    """GET start, by default IdP-initiated SSO for the container SP, and follow it to the container
+    IdP's login page. Returns (login page URL, login page HTML)."""
+    start = start or IDP_SSO + "?spentityid=" + urllib.parse.quote(CONTAINER_SP, safe="")
+    url, status, body = follow(browser, start)
     if status != 200 or not url.startswith(LOGIN_PAGE + "?AuthState="):
-        at = "" if url == sso else f" at {url}"
+        at = "" if url == start else f" at {url}"
         raise AssertionError(
-            f"GET {sso} ended with {status}{at}, expected 200 at {LOGIN_PAGE}?AuthState=…: {excerpt(body)}")
+            f"GET {start} ended with {status}{at}, expected 200 at {LOGIN_PAGE}?AuthState=…: {excerpt(body)}")
     return url, body
 
 
@@ -185,8 +191,58 @@ def case_empty_username_refused():
     assert "Enter a username" in page and "SAMLResponse" not in page
 
 
+def post_to_sp(browser, status, body):
+    """Post the IdP's auto-submit SAMLResponse form on to its action, the container SP's ACS, and
+    follow the redirects. Returns the result page."""
+    form = FormParser(body)
+    if "SAMLResponse" not in form.fields:
+        raise AssertionError(f"the IdP answered {status} without a SAMLResponse form: {excerpt(body)}")
+    url, status, page = follow(browser, form.action, form.fields)
+    if status != 200 or url != RESULT_PAGE:
+        raise AssertionError(
+            f"POST {form.action} ended with {status} at {url}, expected 200 at {RESULT_PAGE}: {excerpt(page)}")
+    return page
+
+
+def sp_login(idp, username):
+    """SP-initiated: start at the SP page's ?idp= login, sign in as username, and post the response
+    to the container SP. Returns the result page. idp must be the container IdP, since the sign-in
+    step drives its login.php."""
+    browser = new_browser()
+    page_url, page = open_login_page(browser, SP_PAGE + "?idp=" + urllib.parse.quote(idp, safe=""))
+    return post_to_sp(browser, *submit_username(browser, page_url, page, username))
+
+
+def idp_initiated_to_sp(username):
+    """IdP-initiated: start at the container IdP's SSO for the container SP, sign in as username,
+    and post the unsolicited response to the SP. Returns the result page."""
+    browser = new_browser()
+    page_url, page = open_login_page(browser)
+    return post_to_sp(browser, *submit_username(browser, page_url, page, username))
+
+
+def case_sp_initiated_self():
+    page = sp_login(idp="https://saml.test/idp", username="alice")   # starts at /sp/?idp=…
+    assert "Flow: SP-initiated" in page
+    assert "Issuer: https://saml.test/idp" in page
+    assert "NameID: alice" in page and "username: alice" in page
+    assert "Signed: yes" in page
+
+
+def case_idp_initiated_self():
+    page = idp_initiated_to_sp(username="bob")   # singleSignOnService?spentityid=https://saml.test/sp, then on to the ACS
+    assert "Flow: IdP-initiated" in page and "NameID: bob" in page
+
+
+def case_unknown_idp_refused():
+    start = SP_PAGE + "?idp=" + urllib.parse.quote("https://evil.example/idp", safe="")
+    status, location, _ = fetch(new_browser(), start)
+    assert status == 400 and location == "", f"GET {start} answered {status} {location}, expected 400"
+
+
 CASES = {
     "idp": [case_admin_asserted, case_odd_username_asserted_verbatim, case_empty_username_refused],
+    "sp": [case_sp_initiated_self, case_idp_initiated_self, case_unknown_idp_refused],
 }
 
 

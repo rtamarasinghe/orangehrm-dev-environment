@@ -86,6 +86,13 @@ check_not "second up: no new keys"      "openssl req -x509" "$out"
 check_not "second up: no new cert"      "mkcert" "$out"
 check_not "second up: no hosts prompt"  "127.0.0.1 saml.test" "$out"
 
+echo "up, metadata export"
+out=$(run up)
+check "up exports IdP metadata" "curl -fsS http://localhost/simplesaml/module.php/saml/idp/metadata" "$out"
+check "up exports SP metadata"  "curl -fsS http://localhost/simplesaml/module.php/saml/sp/metadata/container-sp" "$out"
+check "IdP metadata file"       "+ write $fx/saml/generated/idp-metadata.xml" "$out"
+check "SP metadata file"        "+ write $fx/saml/generated/sp-metadata.xml" "$out"
+
 echo "down"
 out=$(run down);                   check "down removes the container" "-f custom-compose/saml.yml rm -sf saml" "$out"
 
