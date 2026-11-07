@@ -24,7 +24,8 @@
 #      `nginx -t` and a reload. If `nginx -t` fails, the copy is removed again.
 #   4. the /etc/hosts line `127.0.0.1 saml.test`. With a terminal it asks before
 #      running sudo (--yes, -y answers yes); without one it prints the line to add.
-#   5. the trees, state, generated and data folders
+#   5. the trees, state, generated and data folders. data/ is made writable by
+#      everyone, since the container's Apache (www-data) appends acs.log to it.
 # Then it starts the saml service alone, never its dependencies, and waits up to
 # 30 s for SimpleSAMLphp to answer inside the container. Every run then rewrites
 # custom-compose/config/saml/generated/idp-metadata.xml and sp-metadata.xml, the
@@ -32,8 +33,9 @@
 #
 # status prints one line per linked tree: "<tree>  ok", or "<tree>  missing: "
 # and which of these are gone: rows (the two provider rows link added),
-# registration (trees/<tree>.json) and domain.name (no longer the tree's host).
-# It only reads.
+# registration (trees/<tree>.json), domain.name (no longer the tree's host) and
+# files (the tree's IdP key or certificate of link step 4, in the tree folder link
+# recorded). It only reads.
 #
 # link wires one enterprise tree under the TEST source path to the container. It
 # needs `up` to have run once; dev_saml itself may be down. Before each change it
@@ -42,7 +44,8 @@
 #      its own .git folder (worktree trees are refused) and the SAML plugin's cert
 #      folder. A tree that is already linked is left as it is, and one that holds
 #      only one of the two files of step 4 is refused.
-#   2. records the tree's database and its ohrm_config domain.name
+#   2. records the tree's folder (physical path), its database and its
+#      ohrm_config domain.name
 #   3. sets domain.name to <tree>.test-webubuntu83.orangehrmdev.com
 #   4. generates the tree's IdP key and certificate, saml.prod.orangehrm-idp.pem
 #      and .crt, when both are missing
@@ -61,12 +64,16 @@
 # unlink puts a tree back as link found it, from its state folder alone, so
 # dev_saml may be down. A tree with no state folder is not linked: unlink says so,
 # changes nothing and exits 1. Otherwise it
-#   1. puts back the recorded domain.name
+#   1. puts back the recorded domain.name, only while the value is still the
+#      tree's host; a value changed since link is left as it is
 #   2. deletes the recorded provider rows, attribute rows first, and only while
 #      they are still named 'SAML test container'. When an ohrm_external_service
 #      row points at one of them, it deletes none, since that row would go too.
 #   3. deletes the files link created, and no others
 #   4. removes from .git/info/exclude only the lines link added
+#   Steps 3 and 4 work in the tree folder link recorded, and only while the TEST
+#   source path still resolves the tree to it. Otherwise they are skipped with a
+#   message, so a same-named tree of another checkout is never touched.
 #   5. removes trees/<tree>.json
 #   6. clears the tree's symfony cache, as link does
 #   7. removes the state folder
@@ -103,6 +110,8 @@ TREE_DOMAIN=test-webubuntu83.orangehrmdev.com
 IDP_CERT_DIR=symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert
 IDP_KEY_FILE=saml.prod.orangehrm-idp.pem
 IDP_CRT_FILE=saml.prod.orangehrm-idp.crt
+# What a usable state file tree_dir holds: an absolute path on one line.
+TREE_DIR_RE='^/[^[:cntrl:]]*$'
 
 case "${OHRM_TTY:-auto}" in
   1)  interactive=1 ;;
@@ -304,6 +313,9 @@ cmd_up() {
   # trees and data are bind-mount sources. Docker would create a missing one
   # itself, owned by root on Linux.
   run mkdir -p "$SAML_DIR/trees" "$SAML_DIR/state" "$SAML_DIR/generated" "$SAML_DIR/data"
+  # The container's Apache runs as www-data, which on native Linux is not the
+  # host user that owns data/. Dev-only and gitignored.
+  run chmod a+rwx "$SAML_DIR/data"
   log "building and starting $SAML_CONTAINER"
   compose up -d --build --no-deps saml
   wait_for_saml
@@ -337,12 +349,20 @@ cmd_status() {
   done
 }
 
-# Prints "<tree>  ok", or "<tree>  missing: " and which of rows, registration and
-# domain.name are gone. A database that cannot be read counts its checks as
-# missing. Only reads.
+# Prints "<tree>  ok", or "<tree>  missing: " and which of rows, registration,
+# domain.name and files are gone. A database that cannot be read counts its
+# checks as missing, and an unusable tree_dir counts the files as missing. Only
+# reads.
 tree_status() { # tree_status <tree>
-  local tree="$1" state app_db idp sp rows_sql=0 res="" missing=""
+  local tree="$1" state app_db idp sp rows_sql=0 res="" missing="" dir rc f files=0
   state="$(state_dir "$tree")"
+  rc=0; dir="$(state_value "$state/tree_dir" "$TREE_DIR_RE")" || rc=$?
+  if [[ $rc -eq 1 ]]; then dir="$(test_root)/$tree"; fi
+  if [[ $rc -ne 2 ]]; then
+    for f in "$IDP_KEY_FILE" "$IDP_CRT_FILE"; do
+      if [[ -f "$dir/$IDP_CERT_DIR/$f" ]]; then files=$((files + 1)); fi
+    done
+  fi
   app_db="$(state_value "$state/app_db" '^[A-Za-z0-9_]+$')" || app_db=""
   idp="$(state_value "$state/idp_row_id" '^[0-9]+$')" || idp=""
   sp="$(state_value "$state/sp_row_id" '^[0-9]+$')" || sp=""
@@ -355,6 +375,7 @@ tree_status() { # tree_status <tree>
   if [[ "${res%%$'\t'*}" != 2 ]]; then missing+="rows, "; fi
   if [[ ! -f "$SAML_DIR/trees/$tree.json" ]]; then missing+="registration, "; fi
   if [[ "${res#*$'\t'}" != 1 ]]; then missing+="domain.name, "; fi
+  if [[ $files -ne 2 ]]; then missing+="files, "; fi
   if [[ -z "$missing" ]]; then
     printf '%s  ok\n' "$tree"
   else
@@ -380,6 +401,15 @@ test_root() {
 }
 
 tree_host() { printf '%s.%s\n' "$1" "$TREE_DOMAIN"; }
+
+# The physical path of <tree>'s folder under the TEST source path, as link
+# records it in tree_dir. Fails when there is no such folder.
+tree_path() { # tree_path <tree>
+  local d
+  d="$(test_root)/$1"
+  [[ -d "$d" ]] || return 1
+  (cd "$d" && pwd -P)
+}
 
 state_dir() { printf '%s/state/%s\n' "$SAML_DIR" "$1"; }
 
@@ -489,7 +519,7 @@ cmd_link() { # cmd_link <tree>
   for f in idp-metadata.xml sp-metadata.xml; do
     [[ -s "$SAML_DIR/generated/$f" ]] || die "no $SAML_DIR/generated/$f; run 'ohrm saml up' first"
   done
-  dir="$(test_root)/$tree"
+  dir="$(tree_path "$tree")"
   host="$(tree_host "$tree")"
   app_db="$(tree_app_db "$tree")"
   idp_meta="$(to_b64 < "$SAML_DIR/generated/idp-metadata.xml")"
@@ -510,6 +540,7 @@ cmd_link() { # cmd_link <tree>
   fail_step 2
   log "recording $tree's starting state in $state"
   run mkdir -p "$state"
+  printf '%s\n' "$dir" | write_file "$state/tree_dir"
   printf '%s\n' "$app_db" | write_file "$state/app_db"
   # The x keeps a row holding an empty value apart from no row at all.
   raw="$(db_sql "$app_db" <<< "SELECT REPLACE(TO_BASE64(value), CHAR(10), '') FROM ohrm_config WHERE property = 'domain.name';" && printf x)"
@@ -597,9 +628,21 @@ cmd_link() { # cmd_link <tree>
 # order. Every step can run again, so a run that returned 1 can be repeated. It
 # never relies on set -e: it also runs from link's EXIT trap.
 restore_tree() { # restore_tree <tree>
-  local tree="$1" state dir app_db b64 ids="" id f p rc refs failed=0 skip_rows=0
+  local tree="$1" state dir="" recorded current app_db b64 host_b64 changed ids="" id f p rc refs failed=0 skip_rows=0
   state="$(state_dir "$tree")"
-  dir="$(test_root)/$tree"
+  rc=0; recorded="$(state_value "$state/tree_dir" "$TREE_DIR_RE")" || rc=$?
+  current="$(tree_path "$tree")" || current=""
+  if [[ $rc -eq 0 && "$recorded" == "$current" ]]; then dir="$recorded"; fi
+  if [[ $rc -eq 2 ]]; then failed=1; fi
+  if [[ -z "$dir" && $rc -ne 2 ]] && [[ -s "$state/created_files" || -s "$state/exclude_added" ]]; then
+    if [[ $rc -eq 1 ]]; then
+      warn "no tree folder recorded for $tree, so its IdP files and .git/info/exclude lines were left as they are"
+    else
+      warn "$tree was linked at $recorded, but the TEST source path now resolves it to ${current:-no folder}, so its IdP files and .git/info/exclude lines were left as they are; point OHRM_TEST_SRC_PATH back and run unlink again"
+    fi
+    failed=1
+  fi
+
   rc=0; app_db="$(state_value "$state/app_db" '^[A-Za-z0-9_]+$')" || rc=$?
   if [[ $rc -ne 0 ]]; then app_db=""; fi
   if [[ $rc -eq 2 ]]; then failed=1; fi
@@ -611,8 +654,13 @@ restore_tree() { # restore_tree <tree>
     warn "no usable app_db for $tree, so its domain.name was not put back"; failed=1
   elif [[ $rc -eq 0 ]]; then
     log "putting back $tree's domain.name"
-    if ! db_sql "$app_db" > /dev/null <<< "UPDATE ohrm_config SET value = FROM_BASE64('$b64') WHERE property = 'domain.name';"; then
+    # Only while link's value is still there: a database reloaded since link keeps
+    # its own value.
+    host_b64="$(tree_host "$tree" | tr -d '\n' | to_b64)"
+    if ! changed="$(db_sql "$app_db" <<< "UPDATE ohrm_config SET value = FROM_BASE64('$b64') WHERE property = 'domain.name' AND CAST(value AS BINARY) = FROM_BASE64('$host_b64'); SELECT ROW_COUNT();")"; then
       warn "could not put back $tree's domain.name"; failed=1
+    elif [[ "$changed" == 0 && "$b64" != "$host_b64" ]]; then
+      printf "left %s's domain.name as it is: it is no longer %s\n" "$tree" "$(tree_host "$tree")"
     fi
   fi
 
@@ -642,7 +690,7 @@ restore_tree() { # restore_tree <tree>
     fi
   fi
 
-  if [[ -s "$state/created_files" ]]; then
+  if [[ -n "$dir" && -s "$state/created_files" ]]; then
     log "deleting the files link created in $tree"
     while IFS= read -r p || [[ -n "$p" ]]; do
       if [[ -z "$p" ]]; then continue; fi
@@ -655,7 +703,7 @@ restore_tree() { # restore_tree <tree>
     done < "$state/created_files"
   fi
 
-  if [[ -s "$state/exclude_added" && -f "$dir/.git/info/exclude" ]]; then
+  if [[ -n "$dir" && -s "$state/exclude_added" && -f "$dir/.git/info/exclude" ]]; then
     log "removing the lines link added to $tree's .git/info/exclude"
     if ! remove_lines "$dir/.git/info/exclude" "$state/exclude_added"; then
       warn "could not remove link's lines from $dir/.git/info/exclude"; failed=1

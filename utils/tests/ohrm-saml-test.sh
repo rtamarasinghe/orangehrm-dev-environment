@@ -17,7 +17,8 @@ pass=0; fail=0
 
 # $fx/saml is OHRM_SAML_DIR, $fx/nginx is OHRM_NGINX_DIR, $fx/hosts is
 # OHRM_HOSTS_FILE (starts empty) and $fx/test is OHRM_TEST_SRC_PATH.
-fx="$(mktemp -d)"
+# Physical path: link records the tree folder as `pwd -P` gives it.
+fx="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$fx"' EXIT
 mkdir -p "$fx/saml/keys" "$fx/saml/trees" "$fx/nginx/cert/saml" "$fx/test"
 : > "$fx/hosts"
@@ -40,9 +41,10 @@ mkdir -p "$fx/saml/generated"
 printf '<x/>\n' > "$fx/saml/generated/idp-metadata.xml"
 printf '<x/>\n' > "$fx/saml/generated/sp-metadata.xml"
 
-# Dry run, no terminal, so the /etc/hosts step never prompts.
+# Dry run, no terminal, so the /etc/hosts step never prompts. The web container
+# counts as down unless a case sets OHRM_WEB_RUNNING itself.
 run() {
-  ( OHRM_DRY_RUN=1 OHRM_TTY=0 \
+  ( OHRM_DRY_RUN=1 OHRM_TTY=0 OHRM_WEB_RUNNING="${OHRM_WEB_RUNNING:-false}" \
     OHRM_SAML_DIR="$fx/saml" OHRM_NGINX_DIR="$fx/nginx" \
     OHRM_HOSTS_FILE="$fx/hosts" OHRM_TEST_SRC_PATH="$fx/test" \
     "$SAML" "$@" 2>&1 )
@@ -95,6 +97,7 @@ check "up tests nginx before reload"    "docker exec dev_nginx nginx -t" "$out"
 check "no TTY: hosts line printed"      "127.0.0.1 saml.test" "$out"
 check_not "no TTY: no sudo"             "sudo tee" "$out"
 check "up starts only saml"             "-f custom-compose/saml.yml up -d --build --no-deps saml" "$out"
+check "up lets the container write data/" "chmod a+rwx $fx/saml/data" "$out"
 
 echo "up, second run"
 touch "$fx/saml/keys/container.key" "$fx/saml/keys/container.crt" "$fx/saml/keys/secretsalt" "$fx/nginx/cert/saml/cert.pem" "$fx/nginx/cert/saml/key.pem"
@@ -123,6 +126,7 @@ check "needs up first" "run 'ohrm saml up' first" "$out"
 out=$(OHRM_WEB_RUNNING=true run link king)
 check "records domain.name first"       "SELECT REPLACE(TO_BASE64(value), CHAR(10), '') FROM ohrm_config WHERE property = 'domain.name'" "$out"
 check_before "record before update"     "TO_BASE64(value)" "UPDATE ohrm_config" "$out"
+check_before "tree folder recorded first" "write $fx/saml/state/king/tree_dir" "TO_BASE64(value)" "$out"
 check "sets domain.name via base64"     "UPDATE ohrm_config SET value = FROM_BASE64('$(printf %s king.test-webubuntu83.orangehrmdev.com | base64)') WHERE property = 'domain.name'" "$out"
 check "generates tree IdP key"          "openssl req -x509" "$out"
 check "appends pem exclude line"        "/symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem" "$out"
@@ -148,7 +152,7 @@ echo "unlink and rollback"
 # Hand-made state, as link would leave it: only the .pem was created and only
 # its exclude line added.
 mkstate() { # mkstate <tree> <domain value>
-  local d="$fx/saml/state/$1"; mkdir -p "$d"; echo "$1" > "$d/app_db"
+  local d="$fx/saml/state/$1"; mkdir -p "$d"; echo "$1" > "$d/app_db"; echo "$fx/test/$1" > "$d/tree_dir"
   printf %s "$2" | base64 | tr -d '\n' > "$d/domain_name.b64"
   printf '%s\n' symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem > "$d/created_files"
   printf '%s\n' /symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem > "$d/exclude_added"
@@ -157,6 +161,7 @@ mkstate() { # mkstate <tree> <domain value>
 mkstate king "rook-style.example.com"; mkstate queen "localhost"
 out=$(run unlink king)
 check "unlink restores a non-localhost domain.name" "SET value = FROM_BASE64('$(printf %s rook-style.example.com | base64)')" "$out"
+check "unlink restores domain.name only while it is the tree's host" "WHERE property = 'domain.name' AND CAST(value AS BINARY) = FROM_BASE64('$(printf %s king.test-webubuntu83.orangehrmdev.com | base64)')" "$out"
 check "deletes only created files"   "rm -f $fx/test/king/symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem" "$out"
 check_not "keeps files it didn't make" "saml.prod.orangehrm-idp.crt" "$out"
 check "removes only added exclude lines" "remove-lines $fx/test/king/.git/info/exclude" "$out"
@@ -200,6 +205,35 @@ check_not "no rm of an absolute path"        "passwd" "$(rm_lines "$out")"
 check     "paths inside the tree still go"   "rm -f $fx/test/bishop/$cert_dir/saml.prod.orangehrm-idp.pem" "$out"
 check_not "bad created_files keeps the state" "rm -rf $bad" "$out"; [[ $rc -eq 1 ]] || fail_rc
 rm -rf "$bad"
+
+echo "unlink touches files only in the tree folder link recorded"
+# bishop of another checkout: same name, same layout, under another TEST path.
+mkdir -p "$fx/other/bishop/.git/info" "$fx/other/bishop/$cert_dir"
+rm -rf "$bad"; mkstate bishop localhost; echo "$fx/other/bishop" > "$bad/tree_dir"
+out=$(run unlink bishop); rc=$?
+check_not "moved TEST path: no rm in either tree"   "rm -f" "$(grep -v trees/bishop.json <<< "$out")"
+check_not "moved TEST path: exclude left alone"     "remove-lines" "$out"
+check     "moved TEST path: says why"               "linked at $fx/other/bishop" "$out"
+check     "moved TEST path: other steps run"        "rm -f $fx/saml/trees/bishop.json" "$out"
+check_not "moved TEST path keeps the state"         "rm -rf $bad" "$out"; [[ $rc -eq 1 ]] || fail_rc
+
+rm -rf "$bad"; mkstate bishop localhost; rm "$bad/tree_dir"
+out=$(run unlink bishop); rc=$?
+check_not "no tree_dir: no rm in the tree"          "rm -f $fx/test" "$out"
+check_not "no tree_dir: exclude left alone"         "remove-lines" "$out"
+check     "no tree_dir: says why"                   "no tree folder recorded" "$out"
+check_not "no tree_dir keeps the state"             "rm -rf $bad" "$out"; [[ $rc -eq 1 ]] || fail_rc
+rm -rf "$bad"
+
+echo "status"
+# queen keeps the state mkstate gave it above. Dry-run SQL answers DRYRUN, so
+# rows and domain.name always count as missing here.
+out=$(run status)
+check "status lists a linked tree"                 "queen  missing:" "$out"
+check "status: missing IdP files"                  "files" "$(grep '^queen ' <<< "$out")"
+touch "$fx/test/queen/$cert_dir/saml.prod.orangehrm-idp."{pem,crt}
+out=$(run status)
+check_not "status: IdP files present"              "files" "$(grep '^queen ' <<< "$out")"
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
