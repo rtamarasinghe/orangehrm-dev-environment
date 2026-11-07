@@ -7,3 +7,6 @@ html/*
 # Per-machine Compose vars (see .env.example)
 .env
 config/root
+
+# Copied in by `ohrm saml up` once its certificate exists
+config/nginx/virtual-servers/saml.conf

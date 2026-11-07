@@ -128,6 +128,9 @@ check "build hands its arguments to ohrm-build.sh" \
       "-w $C/feature-x/symfony/web/vue-app dev_web_83_ubuntu bash -lc" "$(run build vue feature-x)"
 check "build --help is the build help, not ohrm's" "Steps:" "$(run build --help)"
 
+echo "behaviour: saml"
+check "saml --help is the saml help, not ohrm's" "ohrm saml up" "$(run saml --help)"
+
 echo "behaviour: install"
 
 # install writes for real, so it runs against a throwaway HOME rather than

@@ -24,6 +24,7 @@
 #   ohrm ls                  # list the working copies under TEST
 #   ohrm build [steps] [wc]  # rebuild after a branch switch (sf, vue, client,
 #                            # optional data load) — see 'ohrm build --help'
+#   ohrm saml <command> [tree]   # SAML test container — see 'ohrm saml --help'
 #
 #   ohrm install             # add the `ohrm` function to your shell config
 #   ohrm install --rc ~/.zshrc --rc ~/.bash_profile   # target specific files
@@ -83,7 +84,7 @@ INSTALL_MARKER="# ohrm — shell into ubuntuweb83 (added by utils/ohrm-shell.sh 
 
 usage() {
   printf 'usage: ohrm [destination] [working-copy] [-- command...]\n' >&2
-  printf 'destinations: sf (default) | dt | vue | client | sql | ls | install | build\n' >&2
+  printf 'destinations: sf (default) | dt | vue | client | sql | ls | install | build | saml\n' >&2
   printf "run 'ohrm --help' for the full description\n" >&2
   exit "${1:-2}"
 }
@@ -243,6 +244,9 @@ fi
 if [[ "${ohrm_args[0]:-}" == "build" ]]; then
   exec "$repo_root/utils/ohrm-build.sh" "${ohrm_args[@]:1}"
 fi
+
+# `saml` has its own commands; it lives in utils/ohrm-saml.sh.
+if [[ "${ohrm_args[0]:-}" == "saml" ]]; then exec "$repo_root/utils/ohrm-saml.sh" "${ohrm_args[@]:1}"; fi
 
 # First argument is a destination if it names one; otherwise it's a working copy
 # and the destination falls back to symfony.
