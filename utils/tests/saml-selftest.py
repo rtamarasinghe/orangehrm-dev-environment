@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Live round trips against the SAML test container at https://saml.test.
+
+Usage: python3 -I utils/tests/saml-selftest.py --cafile "$(mkcert -CAROOT)/rootCA.pem" MODE
+
+  idp  IdP-initiated sign-ins at the container IdP for the container's own SP
+       (https://saml.test/sp). Each case decodes the SAMLResponse in the IdP's auto-submit form
+       and never posts it on.
+
+Needs `ohrm saml up` and a running dev_saml. Touches no tree. Prints one `ok <case>` or
+`FAIL <case>: <reason>` line per case and exits 0 only when every case passed.
+Stdlib only: the host has Python 3.9 without lxml.
+"""
+import argparse
+import base64
+import html.parser
+import http.cookiejar
+import re
+import ssl
+import sys
+import traceback
+import types
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+ORIGIN = "https://saml.test"
+CONTAINER_SP = ORIGIN + "/sp"
+IDP_SSO = ORIGIN + "/simplesaml/module.php/saml/idp/singleSignOnService"
+LOGIN_PAGE = ORIGIN + "/login.php"
+NS = {
+    "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
+    "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
+    "ds": "http://www.w3.org/2000/09/xmldsig#",
+}
+
+CAFILE = None  # set from --cafile
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class FormParser(html.parser.HTMLParser):
+    """The first <form> of a page: its action and the values of its named inputs."""
+
+    def __init__(self, page):
+        super().__init__()
+        self.action, self.fields, self._open = None, {}, False
+        self.feed(page)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form" and self.action is None:
+            self.action, self._open = a.get("action") or "", True
+        elif tag == "input" and self._open and a.get("name"):
+            self.fields[a["name"]] = a.get("value") or ""
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._open = False
+
+
+def new_browser():
+    """An opener with its own cookie jar that trusts only CAFILE and never follows redirects."""
+    ctx = ssl.create_default_context(cafile=CAFILE)
+    return urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+        urllib.request.HTTPSHandler(context=ctx), NoRedirect)
+
+
+def fetch(browser, url, form=None):
+    """GET url, or POST form to it. Returns (status, Location, body)."""
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    try:
+        resp = browser.open(urllib.request.Request(url, data=data))
+    except urllib.error.HTTPError as e:
+        resp = e
+    return resp.getcode(), resp.headers.get("Location", ""), resp.read().decode("utf-8", "replace")
+
+
+def follow(browser, url, form=None, hops=10):
+    """Request url, then follow redirects with GET. Returns (final url, status, body)."""
+    status, location, body = fetch(browser, url, form)
+    while status in (301, 302, 303, 307, 308) and location and hops:
+        url = urllib.parse.urljoin(url, location)
+        status, location, body = fetch(browser, url)
+        hops -= 1
+    return url, status, body
+
+
+def excerpt(body):
+    """The cause line of a SimpleSAMLphp error page, else the page's leading text."""
+    cause = re.search(r"Caused by: [^\n<]+", body)
+    if cause:
+        return cause.group(0)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()[:300]
+
+
+def open_login_page(browser):
+    """Start IdP-initiated SSO for the container SP. Returns (login page URL, login page HTML)."""
+    sso = IDP_SSO + "?spentityid=" + urllib.parse.quote(CONTAINER_SP, safe="")
+    url, status, body = follow(browser, sso)
+    if status != 200 or not url.startswith(LOGIN_PAGE + "?AuthState="):
+        at = "" if url == sso else f" at {url}"
+        raise AssertionError(
+            f"GET {sso} ended with {status}{at}, expected 200 at {LOGIN_PAGE}?AuthState=…: {excerpt(body)}")
+    return url, body
+
+
+def submit_username(browser, page_url, page, username):
+    """Post username through the login page's form. Returns (status, body) after redirects."""
+    form = FormParser(page)
+    if "username" not in form.fields or "AuthState" not in form.fields:
+        raise AssertionError(f"the form at {page_url} lacks a username or AuthState field: {sorted(form.fields)}")
+    fields = dict(form.fields, username=username)
+    _, status, body = follow(browser, urllib.parse.urljoin(page_url, form.action), fields)
+    return status, body
+
+
+def decode_response(saml_response):
+    root = ET.fromstring(base64.b64decode(saml_response))
+    assertion = root.find("saml:Assertion", NS)
+    if assertion is None:
+        raise AssertionError("the SAMLResponse has no unencrypted Assertion")
+    name_id = assertion.find("saml:Subject/saml:NameID", NS)
+    if name_id is None:
+        raise AssertionError("the Assertion has no NameID")
+    return types.SimpleNamespace(
+        issuer=root.findtext("saml:Issuer", namespaces=NS),
+        name_id=name_id.text or "",
+        name_id_format=name_id.get("Format"),
+        attributes={
+            a.get("Name"): [v.text or "" for v in a.findall("saml:AttributeValue", NS)]
+            for a in assertion.findall("saml:AttributeStatement/saml:Attribute", NS)
+        },
+        response_signed=root.find("ds:Signature", NS) is not None,
+        assertion_signed=assertion.find("ds:Signature", NS) is not None,
+    )
+
+
+def idp_login(username):
+    """Sign in as username. The result also carries the auto-submit form's action and every page
+    login.php served on the way (login_page_html)."""
+    browser = new_browser()
+    page_url, page = open_login_page(browser)
+    status, body = submit_username(browser, page_url, page, username)
+    form = FormParser(body)
+    if "SAMLResponse" not in form.fields:
+        raise AssertionError(f"POST {LOGIN_PAGE} answered {status} without a SAMLResponse form: {excerpt(body)}")
+    r = decode_response(form.fields["SAMLResponse"])
+    r.form_action = form.action
+    r.login_page_html = page + body
+    return r
+
+
+def idp_login_raw(username):
+    """Post username at the login page and return the page that comes back."""
+    browser = new_browser()
+    page_url, page = open_login_page(browser)
+    return submit_username(browser, page_url, page, username)[1]
+
+
+def case_admin_asserted():
+    r = idp_login("admin")
+    assert r.form_action == "https://saml.test/simplesaml/module.php/saml/sp/saml2-acs.php/container-sp"
+    assert r.issuer == "https://saml.test/idp"
+    assert r.name_id == "admin"
+    assert r.name_id_format == "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
+    assert r.attributes == {"username": ["admin"]}
+    assert r.response_signed or r.assertion_signed
+
+
+def case_odd_username_asserted_verbatim():
+    odd = "  <b>o'neil</b> x  "
+    r = idp_login(odd)
+    assert r.name_id == "<b>o'neil</b> x"
+    assert "<b>o'neil</b>" not in r.login_page_html   # login page never echoes input as HTML
+
+
+def case_empty_username_refused():
+    page = idp_login_raw("   ")
+    assert "Enter a username" in page and "SAMLResponse" not in page
+
+
+CASES = {
+    "idp": [case_admin_asserted, case_odd_username_asserted_verbatim, case_empty_username_refused],
+}
+
+
+def describe(e):
+    if str(e):
+        return str(e)
+    frame = traceback.extract_tb(e.__traceback__)[-1]
+    return f"{type(e).__name__} at line {frame.lineno}: {frame.line}"
+
+
+def main():
+    global CAFILE
+    parser = argparse.ArgumentParser(description="Live round trips against https://saml.test.")
+    parser.add_argument("--cafile", required=True, help="the CA that signed saml.test's certificate")
+    parser.add_argument("mode", choices=sorted(CASES))
+    args = parser.parse_args()
+    CAFILE = args.cafile
+
+    failed = 0
+    for case in CASES[args.mode]:
+        name = case.__name__[len("case_"):].replace("_", " ")
+        try:
+            case()
+            print(f"ok   {name}")
+        except Exception as e:
+            failed += 1
+            print(f"FAIL {name}: {describe(e)}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
