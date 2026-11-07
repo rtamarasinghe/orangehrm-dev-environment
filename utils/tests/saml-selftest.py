@@ -264,7 +264,7 @@ def tree_registration(tree):
 def tree_idp_initiated(tree, username):
     """IdP-initiated: start at the container IdP's SSO for the tree's SP with the RelayState the tree
     expects, sign in as username, post the unsolicited response to the tree's ACS and follow the
-    redirects. Returns (final URL, final page)."""
+    redirects. Returns (final URL, final status, final page)."""
     reg = tree_registration(tree)
     start = (IDP_SSO + "?spentityid=" + urllib.parse.quote(reg["spEntityId"], safe="")
              + "&RelayState=" + urllib.parse.quote(reg["spRelayState"], safe=""))
@@ -276,12 +276,12 @@ def tree_idp_initiated(tree, username):
         raise AssertionError(f"POST {LOGIN_PAGE} answered {status} without a SAMLResponse form: {excerpt(body)}")
     if form.action != reg["spAcsUrl"]:
         raise AssertionError(f"the IdP posts to {form.action}, expected the tree's ACS {reg['spAcsUrl']}")
-    url, _, page = follow(browser, form.action, form.fields)
-    return url, page
+    return follow(browser, form.action, form.fields)
 
 
 def case_tree_idp_initiated(tree):
-    final_url, html = tree_idp_initiated(tree, username="admin")
+    final_url, status, html = tree_idp_initiated(tree, username="admin")
+    assert status == 200, f"the sign-in ended with {status} at {final_url}: {excerpt(html)}"
     assert urlparse(final_url).hostname == f"{tree}.test-webubuntu83.orangehrmdev.com"
     assert "auth/login" not in final_url
     assert "SimpleSAMLphp" not in html or "error" not in html.lower()
