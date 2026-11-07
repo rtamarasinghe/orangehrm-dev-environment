@@ -101,3 +101,70 @@ Use following command if you want to run composer install/update
    - xhgui - XhGUI profiling tool
   
 - Moving from custom version to basic version -  `docker-compose up -d --remove-orphans`
+
+## SAML test container
+
+`dev_saml` is an opt-in SimpleSAMLphp 2.4.1 container at `https://saml.test`, for testing SAML logins against any enterprise tree under `html/OHRMStandalone/TEST` (`<tree>.test-webubuntu83.orangehrmdev.com`). It plays both sides:
+
+- **Container as IdP, tree as SP** (the usual customer setup, like Okta). The tree's login page shows a SAML button. The test IdP asks for a username only, with no password, and asserts whatever you type. A username the tree doesn't have tests the tree's failure path.
+- **Container as SP, tree as IdP.** You log in at the tree, and the container shows what the tree sent.
+
+Both directions work SP-initiated and IdP-initiated, and several trees can be linked at once. `saml.test` is a different site from the trees, so the browser applies the same cookie rules as with a real external IdP. `docker-compose up -d` never starts `dev_saml`, and nginx keeps serving the trees while it is down.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `ohrm saml up` | Sets up whatever is missing, then builds the image if needed and starts `dev_saml` alone. |
+| `ohrm saml down` | Stops and removes `dev_saml`. Keys, certificate, nginx block and linked trees stay. |
+| `ohrm saml status` | Whether `dev_saml` runs, what `https://saml.test/` answers, and one line per linked tree: `<tree>  ok`, or `<tree>  missing: …`. |
+| `ohrm saml link <tree>` | Sets the tree's `domain.name` to its host, creates the tree's IdP key and certificate if they are missing (listed in the tree's `.git/info/exclude`), adds an IdP and an SP provider row named `SAML test container`, registers the tree with the container, and clears the tree's cache. |
+| `ohrm saml unlink <tree>` | Puts the tree back as `link` found it: `domain.name`, files, exclude lines and provider rows. |
+
+`ohrm` hands `saml` to `utils/ohrm-saml.sh`; `ohrm saml --help` has the details. `link` needs `up` to have run once, and `link` and `unlink` both work while `dev_saml` is down.
+
+### First run
+
+The first `ohrm saml up` generates the container's signing keys, an mkcert certificate for `saml.test` in `config/nginx/cert/saml/`, and the nginx block `config/nginx/virtual-servers/saml.conf`. It also adds `127.0.0.1 saml.test` to `/etc/hosts`. That is the only step that needs `sudo`, and it asks first (`--yes` answers yes). Without a terminal it prints the line for you to add yourself.
+
+Your browser must trust the mkcert CA. Run `mkcert -install` once. Firefox keeps its own trust store, and `mkcert -install` updates it only when `certutil` is installed (`brew install nss`). See `config/nginx/cert/README.md`.
+
+### Pages
+
+- `https://saml.test/`: the apps page. For each linked tree, "Sign in to &lt;tree&gt;" signs you in to the tree through the test IdP (IdP-initiated), and "Start at &lt;tree&gt;'s IdP" logs you in at the tree and sends you to the container SP (IdP-initiated).
+- `https://saml.test/sp/`: the container SP. "Log in at &lt;tree&gt;" starts an SP-initiated login at that tree. The result page shows the flow, tree, issuer, NameID, what was signed, the assertion count, and every attribute received. "Clear SP session" logs you out of the container SP only.
+- The tree's own login page: its SAML button sends you to the test IdP (SP-initiated).
+
+The test IdP keeps a normal SSO session, as a real IdP does: after one sign-in, the next login in the same browser skips the username page and asserts the same user. To sign in as someone else, use a private window or clear the browser's cookies for `saml.test`. "Clear SP session" does not end the IdP session.
+
+Single logout is not supported. When you log out of a tree that still holds a SAML session from the test IdP, the tree sends a logout request to `saml.test`, which answers with a SimpleSAMLphp error page ("Could not find a supported SingleLogoutService endpoint"). You are still logged out of the tree: reopening it shows its login page.
+
+### Activity left behind
+
+`unlink` restores configuration, not activity. Test logins leave these in the tree's database:
+
+- login history rows;
+- first-dashboard-load rows;
+- `SimpleSAMLphp_kvstore` rows;
+- one `ohrm_saml_user_identity` row per user who logged in through SAML, each time the tree is linked. After `unlink` these rows remain, with `provider_id = NULL`.
+
+### Reading `acs.log`
+
+Every SAML response posted to the container SP adds one JSON line to `custom-compose/config/saml/data/acs.log`. The line is written before SimpleSAMLphp checks the response, so refused responses are logged too.
+
+```shell
+tail -n 3 custom-compose/config/saml/data/acs.log | jq .
+```
+
+| Key | Meaning |
+|---|---|
+| `time` | When the response arrived, UTC. |
+| `issuer`, `destination` | As in the `samlp:Response`. |
+| `inResponseTo` | The request the response answers; `null` for an IdP-initiated login. |
+| `responseSigned` | The Response carries a signature. |
+| `assertionSigned` | Every Assertion carries a signature (`false` when there is none). |
+| `assertionCount`, `encrypted` | How many Assertions, and whether an `EncryptedAssertion` is present. |
+| `nameId` | The first Assertion's NameID. |
+| `error` | Why the response could not be read, else `null`. |
+
+A key is `null` when the response doesn't have it. The log only locates signatures. SimpleSAMLphp verifies them, and when a check fails its error page says which. On the tree side, the tree's own SimpleSAMLphp log is `symfony/log/<YYYY-MM-DD>-saml.log` in the tree.
