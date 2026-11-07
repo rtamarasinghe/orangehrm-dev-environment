@@ -22,16 +22,16 @@ trap 'rm -rf "$fx"' EXIT
 mkdir -p "$fx/saml/keys" "$fx/saml/trees" "$fx/nginx/cert/saml" "$fx/test"
 : > "$fx/hosts"
 
-# TEST trees: king, queen and knight can be linked; wt is a git worktree (.git is
-# a file). knight never gets a state folder. The container metadata stands in for
-# what `up` exports.
+# TEST trees: king, queen, knight and bishop can be linked; wt is a git worktree
+# (.git is a file). knight never gets a state folder; bishop's state holds one
+# unusable file at a time. The container metadata stands in for what `up` exports.
 cert_dir=symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert
-for t in king queen knight wt; do
+for t in king queen knight bishop wt; do
   mkdir -p "$fx/test/$t/symfony/config" "$fx/test/$t/$cert_dir"
   printf "all:\n  doctrine:\n    param:\n      dsn: 'mysql:host=db101115;port=3306;dbname=%s'\n" "$t" \
     > "$fx/test/$t/symfony/config/databases.yml"
 done
-for t in king queen knight; do
+for t in king queen knight bishop; do
   mkdir -p "$fx/test/$t/.git/info"
   printf '# git ls-files --others --exclude-from=.git/info/exclude\n' > "$fx/test/$t/.git/info/exclude"
 done
@@ -171,6 +171,35 @@ check "unlink without state changes nothing" "king is not linked" "$out"; check_
 out=$(OHRM_SAML_FAIL_AT=7 OHRM_WEB_RUNNING=true run link knight); rc=$?
 check "failed link rolls back" "rolling back knight" "$out"; [[ $rc -eq 1 ]] || fail_rc
 check_before "rollback ends by removing state" "rolling back knight" "rm -rf $fx/saml/state/knight" "$out"
+
+echo "unlink refuses unusable state files"
+# Each case spoils one file of an otherwise good state. The spoiled step is
+# skipped, the other steps still run, the state folder is kept and unlink exits 1.
+bad="$fx/saml/state/bishop"
+sql_lines() { grep -E 'DELETE|UPDATE' <<< "$1"; }
+rm_lines() { grep '^+ rm -f' <<< "$1"; }
+
+rm -rf "$bad"; mkstate bishop localhost; echo '2; DROP TABLE x' > "$bad/sp_row_id"
+out=$(run unlink bishop); rc=$?
+check_not "bad sp_row_id never reaches SQL"  "DROP TABLE" "$(sql_lines "$out")"
+check_not "bad sp_row_id skips the row step" "DELETE" "$out"
+check     "bad sp_row_id: other steps run"   "rm -f $fx/saml/trees/bishop.json" "$out"
+check_not "bad sp_row_id keeps the state"    "rm -rf $bad" "$out"; [[ $rc -eq 1 ]] || fail_rc
+
+rm -rf "$bad"; mkstate bishop localhost; echo "king'x" > "$bad/app_db"
+out=$(run unlink bishop); rc=$?
+check_not "bad app_db never reaches SQL"     "sql[" "$out"
+check     "bad app_db: other steps run"      "rm -f $fx/test/bishop/$cert_dir/saml.prod.orangehrm-idp.pem" "$out"
+check_not "bad app_db keeps the state"       "rm -rf $bad" "$out"; [[ $rc -eq 1 ]] || fail_rc
+
+rm -rf "$bad"; mkstate bishop localhost
+printf '%s\n' ../queen/x /etc/passwd "$cert_dir/saml.prod.orangehrm-idp.pem" > "$bad/created_files"
+out=$(run unlink bishop); rc=$?
+check_not "no rm through a .. path"          "queen" "$(rm_lines "$out")"
+check_not "no rm of an absolute path"        "passwd" "$(rm_lines "$out")"
+check     "paths inside the tree still go"   "rm -f $fx/test/bishop/$cert_dir/saml.prod.orangehrm-idp.pem" "$out"
+check_not "bad created_files keeps the state" "rm -rf $bad" "$out"; [[ $rc -eq 1 ]] || fail_rc
+rm -rf "$bad"
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
