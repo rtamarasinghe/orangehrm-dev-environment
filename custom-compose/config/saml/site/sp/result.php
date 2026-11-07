@@ -4,8 +4,9 @@
  * The container SP's result page: ReturnTo of every /sp/ login, and the SP's RelayState for
  * IdP-initiated ones.
  *
- * Issuer, NameID and attributes come from the container SP's session. Flow and Signed come from
- * the latest /var/saml-data/acs.log line (site/lib/capture.php) whose issuer is the session's IdP.
+ * Issuer, NameID and attributes come from the container SP's session. Flow, Signed and Assertions
+ * come from the latest /var/saml-data/acs.log line (site/lib/capture.php) whose issuer is the
+ * session's IdP.
  * A response that fails SimpleSAMLphp's checks never gets here: its error page shows the exception,
  * and acs.log still holds the raw structure.
  */
@@ -50,13 +51,17 @@ if ($as->isAuthenticated()) {
 
     $entry = $latestAcsEntry($issuer);
     if ($entry === null) {
-        $flow = $signed = 'unknown (no acs.log line from this issuer)';
+        $flow = $signed = $assertions = 'unknown (no acs.log line from this issuer)';
     } else {
         $flow = is_string($entry['inResponseTo'] ?? null) && $entry['inResponseTo'] !== '' ? 'SP-initiated' : 'IdP-initiated';
         $responseSigned = ($entry['responseSigned'] ?? null) === true;
         $assertionSigned = ($entry['assertionSigned'] ?? null) === true;
         $signed = $yesNo($responseSigned || $assertionSigned)
             . ' (response: ' . $yesNo($responseSigned) . ', assertion: ' . $yesNo($assertionSigned) . ')';
+        // SimpleSAMLphp accepts several Assertions and decrypts an EncryptedAssertion, so it never
+        // enforces "exactly one unencrypted Assertion"; this line reports it.
+        $assertions = (is_int($entry['assertionCount'] ?? null) ? (string) $entry['assertionCount'] : 'unknown')
+            . ' (encrypted: ' . $yesNo($entry['encrypted'] ?? null) . ')';
     }
 
     $lines = [
@@ -65,6 +70,7 @@ if ($as->isAuthenticated()) {
         'Issuer: ' . $issuer,
         'NameID: ' . (is_object($nameId) && method_exists($nameId, 'getValue') ? (string) $nameId->getValue() : '(none)'),
         'Signed: ' . $signed,
+        'Assertions: ' . $assertions,
     ];
     foreach ($as->getAttributes() as $name => $values) {
         $shown = array_map(

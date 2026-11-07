@@ -227,11 +227,13 @@ def case_sp_initiated_self():
     assert "Issuer: https://saml.test/idp" in page
     assert "NameID: alice" in page and "username: alice" in page
     assert "Signed: yes" in page
+    assert "Assertions: 1 (encrypted: no)" in page
 
 
 def case_idp_initiated_self():
     page = idp_initiated_to_sp(username="bob")   # singleSignOnService?spentityid=https://saml.test/sp, then on to the ACS
     assert "Flow: IdP-initiated" in page and "NameID: bob" in page
+    assert "Assertions: 1 (encrypted: no)" in page
 
 
 def case_unknown_idp_refused():
