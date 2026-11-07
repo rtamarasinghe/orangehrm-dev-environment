@@ -12,8 +12,8 @@
 #                             # block and linked trees stay
 #   ohrm saml status          # whether dev_saml runs, what https://saml.test/ answers,
 #                             # and one line per linked tree
-#   ohrm saml link <tree>     # see below
-#   ohrm saml unlink <tree>   # see below
+#   ohrm saml link <tree>     # wire a TEST tree to dev_saml
+#   ohrm saml unlink <tree>   # put the tree back as link found it
 #
 # up creates only what is missing, so running it again changes nothing:
 #   1. custom-compose/config/saml/keys/container.{key,crt}, the container's own
@@ -30,23 +30,52 @@
 # custom-compose/config/saml/generated/idp-metadata.xml and sp-metadata.xml, the
 # container IdP's and SP's metadata, which link puts into a tree's database.
 #
+# status prints one line per linked tree: "<tree>  ok", or "<tree>  missing: "
+# and which of these are gone: rows (the two provider rows link added),
+# registration (trees/<tree>.json) and domain.name (no longer the tree's host).
+# It only reads.
+#
 # link wires one enterprise tree under the TEST source path to the container. It
 # needs `up` to have run once; dev_saml itself may be down. Before each change it
 # records what unlink needs to undo it, in custom-compose/config/saml/state/<tree>/.
 #   1. checks the tree: a name matching ^[a-z0-9]+$, symfony/config/databases.yml,
 #      its own .git folder (worktree trees are refused) and the SAML plugin's cert
-#      folder. A tree that is already linked is left as it is.
-#   2. sets ohrm_config domain.name to <tree>.test-webubuntu83.orangehrmdev.com
-#   3. generates the tree's IdP key and certificate, saml.prod.orangehrm-idp.pem
-#      and .crt, when both are missing, and adds them to .git/info/exclude. A
-#      tree that holds only one of the two is refused before step 2.
-#   4. adds an IdP and an SP row named 'SAML test container' to ohrm_saml_provider,
-#      holding the container's metadata, and warns when the tree already had an
-#      active IdP row
-#   5. writes custom-compose/config/saml/trees/<tree>.json, which the container
+#      folder. A tree that is already linked is left as it is, and one that holds
+#      only one of the two files of step 4 is refused.
+#   2. records the tree's database and its ohrm_config domain.name
+#   3. sets domain.name to <tree>.test-webubuntu83.orangehrmdev.com
+#   4. generates the tree's IdP key and certificate, saml.prod.orangehrm-idp.pem
+#      and .crt, when both are missing
+#   5. adds each of the two to .git/info/exclude when it is not listed there
+#   6. warns when the tree already has an active IdP row
+#   7. adds an IdP and an SP row named 'SAML test container' to ohrm_saml_provider,
+#      holding the container's metadata
+#   8. writes custom-compose/config/saml/trees/<tree>.json, which the container
 #      reads to know the tree's IdP and SP
-#   6. clears the tree's symfony cache in the web container. When that container
+#   9. clears the tree's symfony cache in the web container. When that container
 #      is down, it prints the command to run later.
+#  10. prints the tree's login URL and the apps page
+# If any of steps 2 to 9 fails, link prints "rolling back <tree>", undoes what it
+# did as unlink does, and exits 1.
+#
+# unlink puts a tree back as link found it, from its state folder alone, so
+# dev_saml may be down. A tree with no state folder is not linked: unlink says so,
+# changes nothing and exits 1. Otherwise it
+#   1. puts back the recorded domain.name
+#   2. deletes the recorded provider rows, attribute rows first, and only while
+#      they are still named 'SAML test container'. When an ohrm_external_service
+#      row points at one of them, it deletes none, since that row would go too.
+#   3. deletes the files link created, and no others
+#   4. removes from .git/info/exclude only the lines link added
+#   5. removes trees/<tree>.json
+#   6. clears the tree's symfony cache, as link does
+#   7. removes the state folder
+# A step with nothing recorded is skipped, which covers a link that stopped part
+# way and a database reloaded since link. When a step fails, or its state file
+# holds something unusable, the other steps still run, the state folder is kept
+# so unlink can be run again, and unlink exits 1. Activity stays: login history,
+# SimpleSAMLphp_kvstore rows, and ohrm_saml_user_identity rows, whose provider_id
+# becomes NULL.
 #
 # Environment overrides: OHRM_TEST_SRC_PATH (else the value in .env, else
 # html/OHRMStandalone/TEST), OHRM_WEB_CONTAINER (default dev_web_83_ubuntu),
@@ -55,7 +84,8 @@
 # OHRM_TTY=1/0 forces the /etc/hosts prompt on or off. OHRM_DRY_RUN=1 prints each
 # change instead of making it (used by utils/tests/ohrm-saml-test.sh). OHRM_SAML_DIR,
 # OHRM_NGINX_DIR and OHRM_HOSTS_FILE stand in for custom-compose/config/saml,
-# config/nginx and /etc/hosts.
+# config/nginx and /etc/hosts. OHRM_SAML_FAIL_AT=<n> is a test hook: link step n
+# (2 to 9) fails before it changes anything, so the rollback runs.
 set -euo pipefail
 
 SAML_CONTAINER=dev_saml
@@ -158,20 +188,24 @@ write_file() { # write_file <file>
   cat > "$1"
 }
 
-remove_path() { # remove_path <file or folder>
+# Without -r, <path> gets rm -rf only when it is a folder at call time. With -r it
+# always does, so a dry run prints the same command whether or not it exists.
+remove_path() { # remove_path [-r] <path>
   local flag=-f
-  if [[ -d "$1" ]]; then flag=-rf; fi
+  if [[ "$1" == -r ]]; then flag=-rf; shift
+  elif [[ -d "$1" ]]; then flag=-rf; fi
   if dry_run; then trace "rm $flag $1"; return 0; fi
   rm "$flag" "$1"
 }
 
 # Removes from <file> every line equal to a line of <linesfile>. The file keeps
-# its mode and is replaced in one step.
+# its mode and is replaced in one step. Returns non-zero on any failure, also
+# when called where set -e is off.
 remove_lines() { # remove_lines <file> <linesfile>
   if dry_run; then trace "remove-lines $1"; return 0; fi
   local tmp rc=0
-  tmp="$(mktemp "$1.XXXXXX")"
-  cp -p "$1" "$tmp"
+  tmp="$(mktemp "$1.XXXXXX")" || return
+  if ! cp -p "$1" "$tmp"; then rm -f "$tmp"; return 1; fi
   grep -vxF -f "$2" "$1" > "$tmp" || rc=$?
   # grep exits 1 when every line was removed.
   if [[ $rc -gt 1 ]]; then rm -f "$tmp"; return "$rc"; fi
@@ -299,8 +333,33 @@ cmd_status() {
   for d in "$SAML_DIR"/state/*/; do
     [[ -d "$d" ]] || continue
     d="${d%/}"
-    printf '%s  linked\n' "${d##*/}"
+    tree_status "${d##*/}"
   done
+}
+
+# Prints "<tree>  ok", or "<tree>  missing: " and which of rows, registration and
+# domain.name are gone. A database that cannot be read counts its checks as
+# missing. Only reads.
+tree_status() { # tree_status <tree>
+  local tree="$1" state app_db idp sp rows_sql=0 res="" missing=""
+  state="$(state_dir "$tree")"
+  app_db="$(state_value "$state/app_db" '^[A-Za-z0-9_]+$')" || app_db=""
+  idp="$(state_value "$state/idp_row_id" '^[0-9]+$')" || idp=""
+  sp="$(state_value "$state/sp_row_id" '^[0-9]+$')" || sp=""
+  if [[ -n "$idp" && -n "$sp" ]]; then
+    rows_sql="(SELECT COUNT(*) FROM ohrm_saml_provider WHERE id IN ($idp, $sp) AND name = 'SAML test container')"
+  fi
+  if [[ -n "$app_db" ]]; then
+    res="$(db_sql "$app_db" <<< "SELECT $rows_sql, (SELECT COUNT(*) FROM ohrm_config WHERE property = 'domain.name' AND CAST(value AS BINARY) = FROM_BASE64('$(tree_host "$tree" | tr -d '\n' | to_b64)'));")" || res=""
+  fi
+  if [[ "${res%%$'\t'*}" != 2 ]]; then missing+="rows, "; fi
+  if [[ ! -f "$SAML_DIR/trees/$tree.json" ]]; then missing+="registration, "; fi
+  if [[ "${res#*$'\t'}" != 1 ]]; then missing+="domain.name, "; fi
+  if [[ -z "$missing" ]]; then
+    printf '%s  ok\n' "$tree"
+  else
+    printf '%s  missing: %s\n' "$tree" "${missing%, }"
+  fi
 }
 
 ## ---------------------------------------------------------------------------
@@ -334,11 +393,15 @@ tree_app_db() { # tree_app_db <tree>
   printf '%s\n' "$db"
 }
 
-# Exits 1 after printing one message per failed check. The name is checked first
-# because it becomes a path.
+# The name becomes a path, so it is checked before anything else uses it.
+check_slug() { # check_slug <tree>
+  [[ "$1" =~ ^[a-z0-9]+$ ]] || die "tree '$1' must match ^[a-z0-9]+\$"
+}
+
+# Exits 1 after printing one message per failed check.
 check_tree() { # check_tree <tree>
   local root dir failed=0
-  [[ "$1" =~ ^[a-z0-9]+$ ]] || die "tree '$1' must match ^[a-z0-9]+\$"
+  check_slug "$1"
   root="$(test_root)"
   dir="$root/$1"
   [[ -d "$dir" ]] || die "no working copy '$1' under $root"
@@ -360,6 +423,32 @@ web_running() {
   [[ "${OHRM_WEB_RUNNING:-$(docker inspect -f '{{.State.Running}}' "$WEB_CONTAINER" 2>/dev/null || true)}" == true ]]
 }
 
+# Returns the status of the cache clear; a web container that is down is not a
+# failure.
+clear_tree_cache() { # clear_tree_cache <tree>
+  if web_running; then
+    log "clearing $1's symfony cache"
+    run docker exec -w "$CONTAINER_TEST_ROOT/$1/symfony" "$WEB_CONTAINER" php symfony cc
+  else
+    printf 'web container is down; later run: ohrm sf %s -- php symfony cc\n' "$1"
+  fi
+}
+
+# Prints the content of state file <file>, less its trailing newline, when all of
+# it matches <regex>. Returns 1 when the file is absent or empty, and 2 after
+# reporting content that does not match. Every state value that reaches SQL is
+# read through here.
+state_value() { # state_value <file> <regex>
+  local v
+  [[ -s "$1" ]] || return 1
+  v="$(< "$1")"
+  if [[ ! "$v" =~ $2 ]]; then
+    warn "ignoring $1: unexpected content"
+    return 2
+  fi
+  printf '%s\n' "$v"
+}
+
 to_b64() { base64 | tr -d '\n'; }
 
 # A row id read back from the database. Under OHRM_DRY_RUN, db_sql answers DRYRUN.
@@ -372,8 +461,26 @@ check_row_id() { # check_row_id <what> <value>
 ## link
 ## ---------------------------------------------------------------------------
 
-# Each fact goes into the state folder before the change it covers, so unlink can
-# undo a run that stopped part way. No state file is ever sourced as shell.
+# Test hook: OHRM_SAML_FAIL_AT=<n> makes link step <n> fail before it changes
+# anything, so the rollback can be tried live and in a dry run.
+fail_step() { # fail_step <link step>
+  if [[ "${OHRM_SAML_FAIL_AT:-}" == "$1" ]]; then
+    die "link step $1 failed (OHRM_SAML_FAIL_AT=$1)"
+  fi
+}
+
+# EXIT trap while link runs steps 2 to 9, which also catches set -e and die.
+rollback_link() { # rollback_link <exit status>
+  trap - EXIT
+  if [[ $1 -eq 0 ]]; then return 0; fi
+  warn "rolling back $linking_tree"
+  if restore_tree "$linking_tree"; then warn "rolled back $linking_tree"; fi
+  exit 1
+}
+
+# Each fact goes into the state folder before the change it covers, so a rollback
+# or unlink can undo a run that stopped part way. No state file is ever sourced
+# as shell. The step numbers are those in the header.
 cmd_link() { # cmd_link <tree>
   local tree="$1" dir state host app_db idp_meta sp_meta raw b64 f line count active idp_id sp_id cert
   check_tree "$tree"
@@ -397,6 +504,10 @@ cmd_link() { # cmd_link <tree>
     die "$tree has only one of $IDP_KEY_FILE and $IDP_CRT_FILE in $IDP_CERT_DIR; remove it or add the other"
   fi
 
+  linking_tree="$tree"
+  trap 'rollback_link $?' EXIT
+
+  fail_step 2
   log "recording $tree's starting state in $state"
   run mkdir -p "$state"
   printf '%s\n' "$app_db" | write_file "$state/app_db"
@@ -404,15 +515,16 @@ cmd_link() { # cmd_link <tree>
   raw="$(db_sql "$app_db" <<< "SELECT REPLACE(TO_BASE64(value), CHAR(10), '') FROM ohrm_config WHERE property = 'domain.name';" && printf x)"
   raw="${raw%x}"
   if [[ -z "$raw" ]]; then
-    remove_path "$state"
     die "$tree has no domain.name row in ohrm_config of database $app_db"
   fi
   b64="${raw%$'\n'}"
   printf '%s\n' "$b64" | write_file "$state/domain_name.b64"
 
+  fail_step 3
   log "setting $tree's domain.name to $host"
   db_sql "$app_db" > /dev/null <<< "UPDATE ohrm_config SET value = FROM_BASE64('$(printf %s "$host" | to_b64)') WHERE property = 'domain.name';"
 
+  fail_step 4
   if [[ $count -eq 0 ]]; then
     log "generating $tree's IdP key and certificate"
     for f in "$IDP_KEY_FILE" "$IDP_CRT_FILE"; do
@@ -424,6 +536,7 @@ cmd_link() { # cmd_link <tree>
     run chmod 644 "$dir/$IDP_CERT_DIR/$IDP_KEY_FILE" "$dir/$IDP_CERT_DIR/$IDP_CRT_FILE"
   fi
 
+  fail_step 5
   for f in "$IDP_KEY_FILE" "$IDP_CRT_FILE"; do
     line="/$IDP_CERT_DIR/$f"
     if ! grep -qxF -- "$line" "$dir/.git/info/exclude" 2>/dev/null; then
@@ -432,11 +545,13 @@ cmd_link() { # cmd_link <tree>
     fi
   done
 
+  fail_step 6
   active="$(db_sql "$app_db" <<< "SELECT COUNT(*) FROM ohrm_saml_provider WHERE type = 'IDP' AND status = 1;")"
   if [[ "$active" =~ ^[0-9]+$ ]] && (( active > 0 )); then
     warn "warning: $tree already has $active active IdP provider row(s), so its login page will offer more than one SAML provider"
   fi
 
+  fail_step 7
   log "adding the 'SAML test container' IdP and SP rows to $app_db.ohrm_saml_provider"
   idp_id="$(db_sql "$app_db" <<< "INSERT INTO ohrm_saml_provider (name, type, metadata, username_key, status) VALUES ('SAML test container', 'IDP', FROM_BASE64('$idp_meta'), 'username', 1); SELECT LAST_INSERT_ID();")"
   check_row_id IdP "$idp_id"
@@ -446,6 +561,7 @@ cmd_link() { # cmd_link <tree>
   check_row_id SP "$sp_id"
   printf '%s\n' "$sp_id" | write_file "$state/sp_row_id"
 
+  fail_step 8
   # Under OHRM_DRY_RUN the certificate may exist only in the trace.
   if dry_run; then
     cert=DRYRUN
@@ -464,16 +580,108 @@ cmd_link() { # cmd_link <tree>
     --arg spRelayState "https://$host/openidauth/openIdCredentials?openIdProvider=saml_$idp_id" \
     '$ARGS.named' | write_file "$SAML_DIR/trees/$tree.json"
 
-  if web_running; then
-    log "clearing $tree's symfony cache"
-    run docker exec -w "$CONTAINER_TEST_ROOT/$tree/symfony" "$WEB_CONTAINER" php symfony cc
-  else
-    printf 'web container is down; later run: ohrm sf %s -- php symfony cc\n' "$tree"
-  fi
+  fail_step 9
+  clear_tree_cache "$tree"
+  trap - EXIT
 
   log "$tree is linked"
   printf '  tree login: https://%s/auth/login\n' "$host"
   printf '  apps page:  %s\n' "$SAML_URL"
+}
+
+## ---------------------------------------------------------------------------
+## unlink
+## ---------------------------------------------------------------------------
+
+# Undoes link for <tree> from its state folder alone, in the header's unlink
+# order. Every step can run again, so a run that returned 1 can be repeated. It
+# never relies on set -e: it also runs from link's EXIT trap.
+restore_tree() { # restore_tree <tree>
+  local tree="$1" state dir app_db b64 ids="" id f p rc refs failed=0 skip_rows=0
+  state="$(state_dir "$tree")"
+  dir="$(test_root)/$tree"
+  rc=0; app_db="$(state_value "$state/app_db" '^[A-Za-z0-9_]+$')" || rc=$?
+  if [[ $rc -ne 0 ]]; then app_db=""; fi
+  if [[ $rc -eq 2 ]]; then failed=1; fi
+
+  rc=0; b64="$(state_value "$state/domain_name.b64" '^[A-Za-z0-9+/=]*$')" || rc=$?
+  if [[ $rc -eq 2 ]]; then
+    failed=1
+  elif [[ $rc -eq 0 && -z "$app_db" ]]; then
+    warn "no usable app_db for $tree, so its domain.name was not put back"; failed=1
+  elif [[ $rc -eq 0 ]]; then
+    log "putting back $tree's domain.name"
+    if ! db_sql "$app_db" > /dev/null <<< "UPDATE ohrm_config SET value = FROM_BASE64('$b64') WHERE property = 'domain.name';"; then
+      warn "could not put back $tree's domain.name"; failed=1
+    fi
+  fi
+
+  for f in idp_row_id sp_row_id; do
+    rc=0; id="$(state_value "$state/$f" '^[0-9]+$')" || rc=$?
+    if [[ $rc -eq 0 ]]; then ids="${ids:+$ids, }$id"; fi
+    if [[ $rc -eq 2 ]]; then skip_rows=1; fi
+  done
+  if [[ $skip_rows -eq 1 ]]; then
+    failed=1
+  elif [[ -n "$ids" && -z "$app_db" ]]; then
+    warn "no usable app_db for $tree, so provider rows $ids were not deleted"; failed=1
+  elif [[ -n "$ids" ]]; then
+    # ohrm_external_service.idp_id cascades on delete, so a service someone set up
+    # on one of these rows would go with it.
+    refs="$(db_sql "$app_db" <<< "SELECT COUNT(*) FROM ohrm_external_service WHERE idp_id IN (SELECT id FROM ohrm_saml_provider WHERE id IN ($ids) AND name = 'SAML test container');")" || refs=failed
+    if [[ "$refs" == failed ]]; then
+      warn "could not check $app_db.ohrm_external_service, so provider rows $ids were not deleted"; failed=1
+    elif [[ "$refs" =~ ^[0-9]+$ ]] && (( refs > 0 )); then
+      warn "$refs ohrm_external_service row(s) in $app_db use provider rows $ids, so those were not deleted; remove or repoint the service(s), then run unlink again"
+      failed=1
+    else
+      log "deleting $tree's 'SAML test container' provider rows $ids"
+      if ! db_sql "$app_db" > /dev/null <<< "START TRANSACTION; DELETE FROM ohrm_saml_provider_attribute WHERE provider_id IN ($ids) AND provider_id IN (SELECT id FROM ohrm_saml_provider WHERE name = 'SAML test container'); DELETE FROM ohrm_saml_provider WHERE id IN ($ids) AND name = 'SAML test container'; COMMIT;"; then
+        warn "could not delete $tree's provider rows $ids"; failed=1
+      fi
+    fi
+  fi
+
+  if [[ -s "$state/created_files" ]]; then
+    log "deleting the files link created in $tree"
+    while IFS= read -r p || [[ -n "$p" ]]; do
+      if [[ -z "$p" ]]; then continue; fi
+      # Only paths inside the tree: relative, with no .. segment.
+      if [[ "$p" == /* || "/$p/" == */../* ]]; then
+        warn "ignoring '$p' in $state/created_files: not a path inside the tree"; failed=1
+        continue
+      fi
+      if ! run rm -f "$dir/$p"; then failed=1; fi
+    done < "$state/created_files"
+  fi
+
+  if [[ -s "$state/exclude_added" && -f "$dir/.git/info/exclude" ]]; then
+    log "removing the lines link added to $tree's .git/info/exclude"
+    if ! remove_lines "$dir/.git/info/exclude" "$state/exclude_added"; then
+      warn "could not remove link's lines from $dir/.git/info/exclude"; failed=1
+    fi
+  fi
+
+  log "removing $tree's registration with the container"
+  if ! run rm -f "$SAML_DIR/trees/$tree.json"; then failed=1; fi
+
+  if ! clear_tree_cache "$tree"; then
+    printf 'the cache clear failed; later run: ohrm sf %s -- php symfony cc\n' "$tree"
+  fi
+
+  if [[ $failed -ne 0 ]]; then
+    warn "kept $state so that 'ohrm saml unlink $tree' can finish the job once the problems above are fixed"
+    return 1
+  fi
+  remove_path -r "$state" || return 1
+}
+
+cmd_unlink() { # cmd_unlink <tree>
+  local tree="$1"
+  check_slug "$tree"
+  if [[ ! -d "$(state_dir "$tree")" ]]; then die "$tree is not linked"; fi
+  restore_tree "$tree" || exit 1
+  log "$tree is unlinked"
 }
 
 ## ---------------------------------------------------------------------------
@@ -500,7 +708,7 @@ case "$subcmd" in
     "cmd_$subcmd" ;;
   "")
     usage ;;
-  link)
+  link|unlink)
     if [[ -z "$tree" ]]; then printf 'ohrm saml: %s needs a tree\n\n' "$subcmd" >&2; usage; fi
     "cmd_$subcmd" "$tree" ;;
   *)

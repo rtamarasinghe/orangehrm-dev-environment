@@ -19,18 +19,19 @@ pass=0; fail=0
 # OHRM_HOSTS_FILE (starts empty) and $fx/test is OHRM_TEST_SRC_PATH.
 fx="$(mktemp -d)"
 trap 'rm -rf "$fx"' EXIT
-mkdir -p "$fx/saml/keys" "$fx/nginx/cert/saml" "$fx/test"
+mkdir -p "$fx/saml/keys" "$fx/saml/trees" "$fx/nginx/cert/saml" "$fx/test"
 : > "$fx/hosts"
 
-# TEST trees: king and queen can be linked; wt is a git worktree (.git is a file).
-# The container metadata stands in for what `up` exports.
+# TEST trees: king, queen and knight can be linked; wt is a git worktree (.git is
+# a file). knight never gets a state folder. The container metadata stands in for
+# what `up` exports.
 cert_dir=symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert
-for t in king queen wt; do
+for t in king queen knight wt; do
   mkdir -p "$fx/test/$t/symfony/config" "$fx/test/$t/$cert_dir"
   printf "all:\n  doctrine:\n    param:\n      dsn: 'mysql:host=db101115;port=3306;dbname=%s'\n" "$t" \
     > "$fx/test/$t/symfony/config/databases.yml"
 done
-for t in king queen; do
+for t in king queen knight; do
   mkdir -p "$fx/test/$t/.git/info"
   printf '# git ls-files --others --exclude-from=.git/info/exclude\n' > "$fx/test/$t/.git/info/exclude"
 done
@@ -142,6 +143,34 @@ check_not "existing exclude kept"       "append $fx/test/king/.git/info/exclude"
 mkdir -p "$fx/saml/state/king"; out=$(run link king)
 check "already linked is a no-op"       "king is already linked" "$out"
 check_not "no-op touches nothing"       "UPDATE" "$out"
+
+echo "unlink and rollback"
+# Hand-made state, as link would leave it: only the .pem was created and only
+# its exclude line added.
+mkstate() { # mkstate <tree> <domain value>
+  local d="$fx/saml/state/$1"; mkdir -p "$d"; echo "$1" > "$d/app_db"
+  printf %s "$2" | base64 | tr -d '\n' > "$d/domain_name.b64"
+  printf '%s\n' symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem > "$d/created_files"
+  printf '%s\n' /symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem > "$d/exclude_added"
+  echo 41 > "$d/idp_row_id"; echo 42 > "$d/sp_row_id"; echo '{}' > "$fx/saml/trees/$1.json"
+}
+mkstate king "rook-style.example.com"; mkstate queen "localhost"
+out=$(run unlink king)
+check "unlink restores a non-localhost domain.name" "SET value = FROM_BASE64('$(printf %s rook-style.example.com | base64)')" "$out"
+check "deletes only created files"   "rm -f $fx/test/king/symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem" "$out"
+check_not "keeps files it didn't make" "saml.prod.orangehrm-idp.crt" "$out"
+check "removes only added exclude lines" "remove-lines $fx/test/king/.git/info/exclude" "$out"
+check "deletes attribute rows by id" "DELETE FROM ohrm_saml_provider_attribute WHERE provider_id IN (41, 42)" "$out"
+check "deletes provider rows by id"  "DELETE FROM ohrm_saml_provider WHERE id IN (41, 42) AND name = 'SAML test container'" "$out"
+check "removes registration"         "rm -f $fx/saml/trees/king.json" "$out"
+check "removes state last"           "rm -rf $fx/saml/state/king" "$out"
+check_before "registration before state" "trees/king.json" "state/king" "$out"
+check_not "unlink king leaves queen alone" "queen" "$out"
+rm -rf "$fx/saml/state/king"; out=$(run unlink king); rc=$?
+check "unlink without state changes nothing" "king is not linked" "$out"; check_not "no SQL" "sql[" "$out"; [[ $rc -eq 1 ]] || fail_rc
+out=$(OHRM_SAML_FAIL_AT=7 OHRM_WEB_RUNNING=true run link knight); rc=$?
+check "failed link rolls back" "rolling back knight" "$out"; [[ $rc -eq 1 ]] || fail_rc
+check_before "rollback ends by removing state" "rolling back knight" "rm -rf $fx/saml/state/knight" "$out"
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
