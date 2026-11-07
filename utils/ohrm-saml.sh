@@ -70,10 +70,10 @@
 #      they are still named 'SAML test container'. When an ohrm_external_service
 #      row points at one of them, it deletes none, since that row would go too.
 #   3. deletes the files link created, and no others
-#   4. removes from .git/info/exclude only the lines link added
-#   Steps 3 and 4 work in the tree folder link recorded, and only while the TEST
-#   source path still resolves the tree to it. Otherwise they are skipped with a
-#   message, so a same-named tree of another checkout is never touched.
+#   4. removes from .git/info/exclude only the lines link added. Steps 3 and 4
+#      work in the tree folder link recorded, and only while the TEST source
+#      path still resolves the tree to it. Otherwise they are skipped with a
+#      message, so a same-named tree of another checkout is never touched.
 #   5. removes trees/<tree>.json
 #   6. clears the tree's symfony cache, as link does
 #   7. removes the state folder
