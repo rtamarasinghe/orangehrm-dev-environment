@@ -7,12 +7,15 @@ Usage: python3 -I utils/tests/saml-selftest.py --cafile "$(mkcert -CAROOT)/rootC
               (https://saml.test/sp). Each case decodes the SAMLResponse in the IdP's auto-submit
               form and never posts it on.
   sp          Full round trips between the container SP and the container IdP, SP- and
-              IdP-initiated, posted on to the SP's ACS and checked on its result page.
+              IdP-initiated, posted on to the SP's ACS and checked on its result page. Includes a
+              response to an SP-initiated request posted from a browser that never sent the request,
+              and a refused response posted after a login.
   tree TREE   IdP-initiated sign-in as admin at the container IdP for the linked TREE's SP, posted
-              on to the tree's ACS. Needs `ohrm saml link TREE`. The tree records the login
-              (login history, and an ohrm_saml_user_identity row for admin on the first one).
+              on to the tree's ACS, then the same sign-in followed by the tree's logout. Needs
+              `ohrm saml link TREE`. The tree records the logins (login history, and an
+              ohrm_saml_user_identity row for admin on the first one).
 
-Each case uses its own cookie jar, so no IdP or SP session carries over between cases.
+Each case uses its own cookie jars, so no IdP or SP session carries over between cases.
 Needs `ohrm saml up` and a running dev_saml. Only the tree mode touches a tree. Prints one
 `ok <case>` or `FAIL <case>: <reason>` line per case and exits 0 only when every case passed.
 Stdlib only: the host has Python 3.9 without lxml.
@@ -26,6 +29,7 @@ import os
 import re
 import ssl
 import sys
+import time
 import traceback
 import types
 import urllib.error
@@ -35,7 +39,9 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
 ORIGIN = "https://saml.test"
+CONTAINER_IDP = ORIGIN + "/idp"
 CONTAINER_SP = ORIGIN + "/sp"
+CONTAINER_SP_ACS = ORIGIN + "/simplesaml/module.php/saml/sp/saml2-acs.php/container-sp"
 IDP_SSO = ORIGIN + "/simplesaml/module.php/saml/idp/singleSignOnService"
 LOGIN_PAGE = ORIGIN + "/login.php"
 SP_PAGE = ORIGIN + "/sp/"
@@ -142,6 +148,8 @@ def decode_response(saml_response):
     if name_id is None:
         raise AssertionError("the Assertion has no NameID")
     return types.SimpleNamespace(
+        response_id=root.get("ID"),
+        in_response_to=root.get("InResponseTo"),
         issuer=root.findtext("saml:Issuer", namespaces=NS),
         name_id=name_id.text or "",
         name_id_format=name_id.get("Format"),
@@ -178,7 +186,7 @@ def idp_login_raw(username):
 
 def case_admin_asserted():
     r = idp_login("admin")
-    assert r.form_action == "https://saml.test/simplesaml/module.php/saml/sp/saml2-acs.php/container-sp"
+    assert r.form_action == CONTAINER_SP_ACS
     assert r.issuer == "https://saml.test/idp"
     assert r.name_id == "admin"
     assert r.name_id_format == "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
@@ -211,13 +219,19 @@ def post_to_sp(browser, status, body):
     return page
 
 
-def sp_login(idp, username):
-    """SP-initiated: start at the SP page's ?idp= login, sign in as username, and post the response
-    to the container SP. Returns the result page. idp must be the container IdP, since the sign-in
-    step drives its login.php."""
+def start_sp_login(username):
+    """SP-initiated: start at the SP page's ?idp= login for the container IdP and sign in as
+    username. Returns (browser, status, body), body being the IdP's auto-submit form, not yet
+    posted."""
     browser = new_browser()
-    page_url, page = open_login_page(browser, SP_PAGE + "?idp=" + urllib.parse.quote(idp, safe=""))
-    return post_to_sp(browser, *submit_username(browser, page_url, page, username))
+    page_url, page = open_login_page(browser, SP_PAGE + "?idp=" + urllib.parse.quote(CONTAINER_IDP, safe=""))
+    return (browser, *submit_username(browser, page_url, page, username))
+
+
+def sp_login(username):
+    """SP-initiated round trip at the container IdP, posted on to the container SP. Returns the
+    result page."""
+    return post_to_sp(*start_sp_login(username))
 
 
 def idp_initiated_to_sp(username):
@@ -229,7 +243,7 @@ def idp_initiated_to_sp(username):
 
 
 def case_sp_initiated_self():
-    page = sp_login(idp="https://saml.test/idp", username="alice")   # starts at /sp/?idp=…
+    page = sp_login(username="alice")   # starts at /sp/?idp=https://saml.test/idp
     assert "Flow: SP-initiated" in page
     assert "Issuer: https://saml.test/idp" in page
     assert "NameID: alice" in page and "username: alice" in page
@@ -241,6 +255,52 @@ def case_idp_initiated_self():
     page = idp_initiated_to_sp(username="bob")   # singleSignOnService?spentityid=https://saml.test/sp, then on to the ACS
     assert "Flow: IdP-initiated" in page and "NameID: bob" in page
     assert "Assertions: 1 (encrypted: no)" in page
+
+
+def case_sp_initiated_response_without_its_request():
+    _, status, body = start_sp_login("carol")
+    page = post_to_sp(new_browser(), status, body)   # a browser that holds no pending request
+    sent = decode_response(FormParser(body).fields["SAMLResponse"])
+    assert sent.in_response_to, "the SP-initiated response carries no InResponseTo"
+    want = f"Flow: InResponseTo {sent.in_response_to} matched no pending request (accepted as unsolicited)"
+    assert want in page, f"the result page lacks '{want}': {excerpt(page)}"
+    assert "NameID: carol" in page
+
+
+def refused_response():
+    """A base64 samlp:Response from the container IdP with no Assertion, which the container SP
+    refuses. Returns (response ID, base64 XML)."""
+    response_id = "_selftest" + os.urandom(16).hex()
+    xml = (
+        '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"'
+        ' xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"'
+        f' ID="{response_id}" Version="2.0" IssueInstant="{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}"'
+        f' Destination="{CONTAINER_SP_ACS}">'
+        f"<saml:Issuer>{CONTAINER_IDP}</saml:Issuer>"
+        '<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>'
+        "</samlp:Response>"
+    )
+    return response_id, base64.b64encode(xml.encode()).decode()
+
+
+def case_result_page_keeps_the_login_after_a_refused_response():
+    browser, status, body = start_sp_login("dave")
+    post_to_sp(browser, status, body)
+    _, refused = refused_response()
+    url, status, page = follow(browser, CONTAINER_SP_ACS, {"SAMLResponse": refused})
+    assert url != RESULT_PAGE, "the SP accepted a response with no Assertion"
+    _, status, page = follow(browser, RESULT_PAGE)
+    assert status == 200 and "NameID: dave" in page, f"GET {RESULT_PAGE} answered {status}: {excerpt(page)}"
+    assert "Signed: yes" in page, f"Signed is not the login's: {excerpt(page)}"
+    assert "Assertions: 1 (encrypted: no)" in page, f"Assertions is not the login's: {excerpt(page)}"
+
+
+def case_odd_username_escaped_on_result_page():
+    odd = "<b>o'neil</b>"
+    page = sp_login(username=odd)
+    escaped = "&lt;b&gt;o&#039;neil&lt;/b&gt;"
+    assert f"NameID: {escaped}" in page and f"username: {escaped}" in page, excerpt(page)
+    assert odd not in page
 
 
 def case_unknown_idp_refused():
@@ -261,14 +321,13 @@ def tree_registration(tree):
         raise AssertionError(f"no {path}; run `ohrm saml link {tree}` first") from None
 
 
-def tree_idp_initiated(tree, username):
+def tree_idp_initiated(browser, tree, username):
     """IdP-initiated: start at the container IdP's SSO for the tree's SP with the RelayState the tree
     expects, sign in as username, post the unsolicited response to the tree's ACS and follow the
-    redirects. Returns (final URL, final status, final page)."""
+    redirects, all in browser. Returns (final URL, final status, final page)."""
     reg = tree_registration(tree)
     start = (IDP_SSO + "?spentityid=" + urllib.parse.quote(reg["spEntityId"], safe="")
              + "&RelayState=" + urllib.parse.quote(reg["spRelayState"], safe=""))
-    browser = new_browser()
     page_url, page = open_login_page(browser, start)
     status, body = submit_username(browser, page_url, page, username)
     form = FormParser(body)
@@ -279,18 +338,50 @@ def tree_idp_initiated(tree, username):
     return follow(browser, form.action, form.fields)
 
 
-def case_tree_idp_initiated(tree):
-    final_url, status, html = tree_idp_initiated(tree, username="admin")
+# A tree serves this page for a secure URL to a visitor who is not logged in; a browser runs it and
+# lands on the login form, which /auth/seamlessLogin serves.
+TREE_ANONYMOUS_SHELL = 'window.location = "/auth/seamlessLogin"'
+TREE_LOGIN_FORM = 'name="txtPassword"'
+
+
+def tree_signed_in(browser, tree):
+    """Sign in to tree as admin through tree_idp_initiated and check that it landed logged in.
+    Returns the URL it landed on."""
+    final_url, status, html = tree_idp_initiated(browser, tree, username="admin")
     assert status == 200, f"the sign-in ended with {status} at {final_url}: {excerpt(html)}"
     assert urlparse(final_url).hostname == f"{tree}.test-webubuntu83.orangehrmdev.com"
     assert "auth/login" not in final_url
+    assert TREE_ANONYMOUS_SHELL not in html and TREE_LOGIN_FORM not in html, \
+        f"the sign-in ended at {final_url} on a page for a visitor who is not logged in"
     assert "SimpleSAMLphp" not in html or "error" not in html.lower()
+    return final_url
+
+
+def case_tree_idp_initiated(tree):
+    tree_signed_in(new_browser(), tree)
+
+
+def case_tree_logout_ends_on_tree_login(tree):
+    browser = new_browser()
+    landed = tree_signed_in(browser, tree)
+    host = f"{tree}.test-webubuntu83.orangehrmdev.com"
+    url, status, html = follow(browser, f"https://{host}/auth/logout")
+    assert urlparse(url).hostname == host and "auth/login" in url and status == 200 and TREE_LOGIN_FORM in html, \
+        f"the logout ended with {status} at {url}, expected 200 at {host}'s login page: {excerpt(html)}"
+    url, status, html = follow(browser, landed)
+    if TREE_ANONYMOUS_SHELL in html:
+        url, status, html = follow(browser, f"https://{host}/auth/seamlessLogin")
+    assert status == 200 and TREE_LOGIN_FORM in html, \
+        f"reopening {landed} after the logout ended with {status} at {url}, not on the login form: {excerpt(html)}"
 
 
 CASES = {
     "idp": [case_admin_asserted, case_odd_username_asserted_verbatim, case_empty_username_refused],
-    "sp": [case_sp_initiated_self, case_idp_initiated_self, case_unknown_idp_refused],
-    "tree": [case_tree_idp_initiated],
+    "sp": [case_sp_initiated_self, case_idp_initiated_self, case_unknown_idp_refused,
+           case_sp_initiated_response_without_its_request,
+           case_result_page_keeps_the_login_after_a_refused_response,
+           case_odd_username_escaped_on_result_page],
+    "tree": [case_tree_idp_initiated, case_tree_logout_ends_on_tree_login],
 }
 
 
