@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """Live round trips against the SAML test container at https://saml.test.
 
-Usage: python3 -I utils/tests/saml-selftest.py --cafile "$(mkcert -CAROOT)/rootCA.pem" MODE
+Usage: python3 -I utils/tests/saml-selftest.py --cafile "$(mkcert -CAROOT)/rootCA.pem" MODE [TREE]
 
-  idp  IdP-initiated sign-ins at the container IdP for the container's own SP
-       (https://saml.test/sp). Each case decodes the SAMLResponse in the IdP's auto-submit form
-       and never posts it on.
-  sp   Full round trips between the container SP and the container IdP, SP- and IdP-initiated,
-       posted on to the SP's ACS and checked on its result page.
+  idp         IdP-initiated sign-ins at the container IdP for the container's own SP
+              (https://saml.test/sp). Each case decodes the SAMLResponse in the IdP's auto-submit
+              form and never posts it on.
+  sp          Full round trips between the container SP and the container IdP, SP- and
+              IdP-initiated, posted on to the SP's ACS and checked on its result page.
+  tree TREE   IdP-initiated sign-in as admin at the container IdP for the linked TREE's SP, posted
+              on to the tree's ACS. Needs `ohrm saml link TREE`. The tree records the login
+              (login history, and an ohrm_saml_user_identity row for admin on the first one).
 
 Each case uses its own cookie jar, so no IdP or SP session carries over between cases.
-Needs `ohrm saml up` and a running dev_saml. Touches no tree. Prints one `ok <case>` or
-`FAIL <case>: <reason>` line per case and exits 0 only when every case passed.
+Needs `ohrm saml up` and a running dev_saml. Only the tree mode touches a tree. Prints one
+`ok <case>` or `FAIL <case>: <reason>` line per case and exits 0 only when every case passed.
 Stdlib only: the host has Python 3.9 without lxml.
 """
 import argparse
 import base64
 import html.parser
 import http.cookiejar
+import json
+import os
 import re
 import ssl
 import sys
@@ -27,6 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 
 ORIGIN = "https://saml.test"
 CONTAINER_SP = ORIGIN + "/sp"
@@ -34,6 +40,7 @@ IDP_SSO = ORIGIN + "/simplesaml/module.php/saml/idp/singleSignOnService"
 LOGIN_PAGE = ORIGIN + "/login.php"
 SP_PAGE = ORIGIN + "/sp/"
 RESULT_PAGE = ORIGIN + "/sp/result.php"
+TREES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "custom-compose", "config", "saml", "trees")
 NS = {
     "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
     "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
@@ -242,9 +249,48 @@ def case_unknown_idp_refused():
     assert status == 400 and location == "", f"GET {start} answered {status} {location}, expected 400"
 
 
+def tree_registration(tree):
+    """The tree's trees/<tree>.json, as `ohrm saml link <tree>` wrote it."""
+    if not re.fullmatch(r"[a-z0-9]+", tree):
+        raise AssertionError(f"tree {tree!r} must match ^[a-z0-9]+$")
+    path = os.path.normpath(os.path.join(TREES_DIR, tree + ".json"))
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise AssertionError(f"no {path}; run `ohrm saml link {tree}` first") from None
+
+
+def tree_idp_initiated(tree, username):
+    """IdP-initiated: start at the container IdP's SSO for the tree's SP with the RelayState the tree
+    expects, sign in as username, post the unsolicited response to the tree's ACS and follow the
+    redirects. Returns (final URL, final page)."""
+    reg = tree_registration(tree)
+    start = (IDP_SSO + "?spentityid=" + urllib.parse.quote(reg["spEntityId"], safe="")
+             + "&RelayState=" + urllib.parse.quote(reg["spRelayState"], safe=""))
+    browser = new_browser()
+    page_url, page = open_login_page(browser, start)
+    status, body = submit_username(browser, page_url, page, username)
+    form = FormParser(body)
+    if "SAMLResponse" not in form.fields:
+        raise AssertionError(f"POST {LOGIN_PAGE} answered {status} without a SAMLResponse form: {excerpt(body)}")
+    if form.action != reg["spAcsUrl"]:
+        raise AssertionError(f"the IdP posts to {form.action}, expected the tree's ACS {reg['spAcsUrl']}")
+    url, _, page = follow(browser, form.action, form.fields)
+    return url, page
+
+
+def case_tree_idp_initiated(tree):
+    final_url, html = tree_idp_initiated(tree, username="admin")
+    assert urlparse(final_url).hostname == f"{tree}.test-webubuntu83.orangehrmdev.com"
+    assert "auth/login" not in final_url
+    assert "SimpleSAMLphp" not in html or "error" not in html.lower()
+
+
 CASES = {
     "idp": [case_admin_asserted, case_odd_username_asserted_verbatim, case_empty_username_refused],
     "sp": [case_sp_initiated_self, case_idp_initiated_self, case_unknown_idp_refused],
+    "tree": [case_tree_idp_initiated],
 }
 
 
@@ -260,14 +306,18 @@ def main():
     parser = argparse.ArgumentParser(description="Live round trips against https://saml.test.")
     parser.add_argument("--cafile", required=True, help="the CA that signed saml.test's certificate")
     parser.add_argument("mode", choices=sorted(CASES))
+    parser.add_argument("tree", nargs="?", help="the linked tree, for the tree mode only")
     args = parser.parse_args()
+    if (args.mode == "tree") != (args.tree is not None):
+        parser.error("a tree is given with, and only with, the tree mode")
     CAFILE = args.cafile
+    case_args = (args.tree,) if args.mode == "tree" else ()
 
     failed = 0
     for case in CASES[args.mode]:
         name = case.__name__[len("case_"):].replace("_", " ")
         try:
-            case()
+            case(*case_args)
             print(f"ok   {name}")
         except Exception as e:
             failed += 1

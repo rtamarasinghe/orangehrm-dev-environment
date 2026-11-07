@@ -22,6 +22,23 @@ trap 'rm -rf "$fx"' EXIT
 mkdir -p "$fx/saml/keys" "$fx/nginx/cert/saml" "$fx/test"
 : > "$fx/hosts"
 
+# TEST trees: king and queen can be linked; wt is a git worktree (.git is a file).
+# The container metadata stands in for what `up` exports.
+cert_dir=symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert
+for t in king queen wt; do
+  mkdir -p "$fx/test/$t/symfony/config" "$fx/test/$t/$cert_dir"
+  printf "all:\n  doctrine:\n    param:\n      dsn: 'mysql:host=db101115;port=3306;dbname=%s'\n" "$t" \
+    > "$fx/test/$t/symfony/config/databases.yml"
+done
+for t in king queen; do
+  mkdir -p "$fx/test/$t/.git/info"
+  printf '# git ls-files --others --exclude-from=.git/info/exclude\n' > "$fx/test/$t/.git/info/exclude"
+done
+printf 'gitdir: /elsewhere/.git/worktrees/wt\n' > "$fx/test/wt/.git"
+mkdir -p "$fx/saml/generated"
+printf '<x/>\n' > "$fx/saml/generated/idp-metadata.xml"
+printf '<x/>\n' > "$fx/saml/generated/sp-metadata.xml"
+
 # Dry run, no terminal, so the /etc/hosts step never prompts.
 run() {
   ( OHRM_DRY_RUN=1 OHRM_TTY=0 \
@@ -95,6 +112,36 @@ check "SP metadata file"        "+ write $fx/saml/generated/sp-metadata.xml" "$o
 
 echo "down"
 out=$(run down);                   check "down removes the container" "-f custom-compose/saml.yml rm -sf saml" "$out"
+
+echo "link"
+out=$(run link 'Bad!');            check "bad slug refused"        "must match ^[a-z0-9]+\$" "$out"
+out=$(run link nosuch);            check "unknown tree refused"    "no working copy 'nosuch'" "$out"
+out=$(run link wt);                check "worktree refused"        "worktree trees are not supported" "$out"
+mv "$fx/saml/generated" "$fx/saml/gen.off"; out=$(run link king); mv "$fx/saml/gen.off" "$fx/saml/generated"
+check "needs up first" "run 'ohrm saml up' first" "$out"
+out=$(OHRM_WEB_RUNNING=true run link king)
+check "records domain.name first"       "SELECT REPLACE(TO_BASE64(value), CHAR(10), '') FROM ohrm_config WHERE property = 'domain.name'" "$out"
+check_before "record before update"     "TO_BASE64(value)" "UPDATE ohrm_config" "$out"
+check "sets domain.name via base64"     "UPDATE ohrm_config SET value = FROM_BASE64('$(printf %s king.test-webubuntu83.orangehrmdev.com | base64)') WHERE property = 'domain.name'" "$out"
+check "generates tree IdP key"          "openssl req -x509" "$out"
+check "appends pem exclude line"        "/symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.pem" "$out"
+check "inserts IdP row"                 "'SAML test container', 'IDP'" "$out"
+check "IdP row username_key"            "'username', 1" "$out"
+check "inserts SP row"                  "'SAML test container', 'SP'" "$out"
+check "maps four attributes"            "(@sp, 2, 'username'), (@sp, 3, 'firstName'), (@sp, 5, 'email'), (@sp, 6, 'employeeId')" "$out"
+check "writes registration"             "$fx/saml/trees/king.json" "$out"
+check "clears tree cache"               "php symfony cc" "$out"
+out=$(OHRM_WEB_RUNNING=false run link king)
+check_not "link skips cache clear when web container is down" "docker exec -w /var/www/html/OHRMStandalone/TEST/king/symfony" "$out"
+check     "says how to clear later"     "ohrm sf king -- php symfony cc" "$out"
+touch "$fx/test/king/symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp."{pem,crt}
+printf '%s\n' /symfony/plugins/orangehrmOpenidAuthenticationPlugin/config/saml/cert/saml.prod.orangehrm-idp.{pem,crt} >> "$fx/test/king/.git/info/exclude"
+out=$(run link king)
+check_not "existing key kept"           "openssl req -x509" "$out"
+check_not "existing exclude kept"       "append $fx/test/king/.git/info/exclude" "$out"
+mkdir -p "$fx/saml/state/king"; out=$(run link king)
+check "already linked is a no-op"       "king is already linked" "$out"
+check_not "no-op touches nothing"       "UPDATE" "$out"
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
