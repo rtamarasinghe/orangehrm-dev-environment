@@ -1,0 +1,18 @@
+services:
+  saml:
+    build: ./custom-compose/config/saml
+    image: ohrm-dev/saml-test:2.4.1
+    container_name: dev_saml
+    volumes:
+      - ./custom-compose/config/saml/simplesamlphp/config:/etc/simplesamlphp/config:ro
+      - ./custom-compose/config/saml/simplesamlphp/metadata:/etc/simplesamlphp/metadata:ro
+      - ./custom-compose/config/saml/simplesamlphp/modules/testidp:/var/simplesamlphp/modules/testidp:ro
+      - ./custom-compose/config/saml/keys:/etc/simplesamlphp/cert:ro
+      - ./custom-compose/config/saml/site:/var/www/site:ro
+      - ./custom-compose/config/saml/trees:/var/saml-trees:ro
+      - ./custom-compose/config/saml/data:/var/saml-data
+    # No host port: nginx proxies https://saml.test to this address.
+    networks:
+      ohrmdevnet:
+        ipv4_address: 10.5.2.7
+    restart: "no"

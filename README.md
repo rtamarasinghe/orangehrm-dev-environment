@@ -72,6 +72,7 @@ Replace the **NAME** with any name you want for your instance.
 | dev_mariadb_10117| db10117                            | MariaDB 10.11.7| 10.5.1.117 | 3306                         | -                   |
 | dev_phpmyadmin   | phpmyadmin                         | phpMyAdmin     | 10.5.2.2   | 80                           | -                   |
 | dev_rabbitmq     | rabbitmq                           | RabbitMQ 3.6   | 10.5.2.3   | 15671,5671                   | 15671               |
+| dev_saml         | saml                               | SimpleSAMLphp 2.4.1 | 10.5.2.7 | 80                        | -                   |
 
 ## How to add custom PHP configurations
 - Add custom PHP configurations to the file **./config/<WEB_CONTAINER>/php/custom_php.ini**. And then reload the apache service (inside the relevant container). **WEB_CONTAINER** can be web71, web72, web56 ,etc.
