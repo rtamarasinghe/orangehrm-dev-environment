@@ -14,5 +14,15 @@ $config = [
         'privatekey' => 'container.key',
         'certificate' => 'container.crt',
         'RelayState' => 'https://saml.test/sp/result.php',
+        'authproc' => [
+            // The ACS sets saml:sp:isUnsolicited in the SP state when it processes a response as
+            // unsolicited: no InResponseTo, or one whose request state it could not load. Listing it
+            // in PersistentAuthData keeps it in the session (only when set), where site/sp/result.php
+            // reads it. $state here is the processing-chain state; the SP state is under saml:sp:State.
+            10 => [
+                'class' => 'core:PHP',
+                'code' => '$state["saml:sp:State"]["PersistentAuthData"][] = "saml:sp:isUnsolicited";',
+            ],
+        ],
     ],
 ];

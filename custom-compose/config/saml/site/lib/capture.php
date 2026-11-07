@@ -6,7 +6,9 @@
  * /var/saml-data/acs.log before SimpleSAMLphp checks it, so a refused response is on record too.
  *
  * Keys, always all present (null when not found):
- *   time, issuer, inResponseTo, destination  as in the samlp:Response
+ *   time
+ *   issuer, inResponseTo, destination  as in the samlp:Response
+ *   responseId       the samlp:Response's ID, which site/sp/result.php matches on
  *   responseSigned   a ds:Signature is a direct child of samlp:Response
  *   assertionSigned  every saml:Assertion has a ds:Signature as a direct child (false with none)
  *   assertionCount   saml:Assertion children of samlp:Response
@@ -33,6 +35,7 @@ declare(strict_types=1);
     $entry = [
         'time' => gmdate('c'),
         'issuer' => null,
+        'responseId' => null,
         'inResponseTo' => null,
         'destination' => null,
         'responseSigned' => null,
@@ -79,6 +82,7 @@ declare(strict_types=1);
 
         $issuer = $xp->query('saml:Issuer', $response)->item(0);
         $entry['issuer'] = $issuer ? trim($issuer->textContent) : null;
+        $entry['responseId'] = $response->hasAttribute('ID') ? $response->getAttribute('ID') : null;
         $entry['inResponseTo'] = $response->hasAttribute('InResponseTo') ? $response->getAttribute('InResponseTo') : null;
         $entry['destination'] = $response->hasAttribute('Destination') ? $response->getAttribute('Destination') : null;
         $entry['responseSigned'] = $hasSignatureChild($response);
